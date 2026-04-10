@@ -22,6 +22,21 @@ def _state_to_vector(state: np.ndarray) -> np.ndarray:
     return state.astype(np.float32).reshape(1, -1)
 
 
+def _center_weights(board_size: int, legal_moves: Sequence[int]) -> np.ndarray:
+    if not legal_moves:
+        return np.array([], dtype=np.float32)
+    center = (board_size - 1) / 2.0
+    weights = []
+    for move in legal_moves:
+        row, col = divmod(int(move), board_size)
+        distance = np.sqrt((row - center) ** 2 + (col - center) ** 2)
+        # Keep all moves possible, but softly favor center and near-center cells.
+        weights.append(1.0 / (1.0 + distance))
+    arr = np.asarray(weights, dtype=np.float32)
+    arr /= np.sum(arr)
+    return arr
+
+
 def _transform_coords(row: int, col: int, size: int, transform_id: int) -> Tuple[int, int]:
     if transform_id == 0:
         return row, col
@@ -189,12 +204,18 @@ class QLearningAgent:
         if not legal_moves:
             return 0
         if explore and np.random.random() < self.epsilon:
-            return int(np.random.choice(legal_moves))
+            weights = _center_weights(self.board_size, legal_moves)
+            return int(np.random.choice(legal_moves, p=weights))
 
         q_values = self._get_q_values(state)
-        masked = np.full_like(q_values, -np.inf, dtype=np.float32)
-        masked[legal_moves] = q_values[legal_moves]
-        return int(np.argmax(masked))
+        legal_q = q_values[legal_moves].astype(np.float32)
+        max_q = float(np.max(legal_q))
+        candidates = [move for move, value in zip(legal_moves, legal_q) if abs(float(value) - max_q) < 1e-6]
+        if len(candidates) == 1:
+            return int(candidates[0])
+
+        weights = _center_weights(self.board_size, candidates)
+        return int(np.random.choice(candidates, p=weights))
 
     def learn_transition(self, transition: Transition) -> float:
         total_loss = 0.0
@@ -290,12 +311,18 @@ class DQNAgent:
         if not legal_moves:
             return 0
         if explore and np.random.random() < self.epsilon:
-            return int(np.random.choice(legal_moves))
+            weights = _center_weights(self.board_size, legal_moves)
+            return int(np.random.choice(legal_moves, p=weights))
 
         q_values = self.model.predict(_state_to_vector(state))[0]
-        masked = np.full_like(q_values, -np.inf, dtype=np.float32)
-        masked[legal_moves] = q_values[legal_moves]
-        return int(np.argmax(masked))
+        legal_q = q_values[legal_moves].astype(np.float32)
+        max_q = float(np.max(legal_q))
+        candidates = [move for move, value in zip(legal_moves, legal_q) if abs(float(value) - max_q) < 1e-6]
+        if len(candidates) == 1:
+            return int(candidates[0])
+
+        weights = _center_weights(self.board_size, candidates)
+        return int(np.random.choice(candidates, p=weights))
 
     def remember(self, transition: Transition) -> None:
         for transform_id in range(8):

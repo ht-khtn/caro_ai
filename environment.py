@@ -38,6 +38,7 @@ class GomokuEnv:
         self.board = np.zeros((self.board_size, self.board_size), dtype=np.int8)
         self.current_player = 1
         self.last_move: Optional[Tuple[int, int]] = None
+        self.last_win_line: Optional[List[Tuple[int, int]]] = None
         self.done = False
         self.winner = 0
         self.move_count = 0
@@ -47,6 +48,7 @@ class GomokuEnv:
         self.board.fill(0)
         self.current_player = 1
         self.last_move = None
+        self.last_win_line = None
         self.done = False
         self.winner = 0
         self.move_count = 0
@@ -98,18 +100,21 @@ class GomokuEnv:
         done = False
         winner = 0
 
-        if self._has_winner(row, col, player):
+        win_line = self._find_winning_line(row, col, player)
+        if win_line is not None:
             reward = 100.0
             done = True
             winner = player
             self.done = True
             self.winner = player
+            self.last_win_line = win_line
         else:
             reward = self._shape_reward(before_board, self.board, player)
             if self.move_count >= self.board_size * self.board_size:
                 done = True
                 self.done = True
                 self.winner = 0
+            self.last_win_line = None
 
         if not done:
             self.current_player *= -1
@@ -119,6 +124,7 @@ class GomokuEnv:
             "player": player,
             "move": (row, col),
             "winner": winner,
+            "win_line": self.last_win_line,
             "shaped_reward": reward,
             "done_reason": "win" if winner else ("draw" if done else "running"),
         }
@@ -151,15 +157,15 @@ class GomokuEnv:
                 counts[stones] += 1
         return counts
 
-    def _has_winner(self, row: int, col: int, player: int) -> bool:
+    def _find_winning_line(self, row: int, col: int, player: int) -> Optional[List[Tuple[int, int]]]:
         directions = ((1, 0), (0, 1), (1, 1), (1, -1))
         for dr, dc in directions:
-            length = 1
-            length += self._count_one_direction(row, col, dr, dc, player)
-            length += self._count_one_direction(row, col, -dr, -dc, player)
-            if length >= self.win_length:
-                return True
-        return False
+            negative = self._collect_one_direction(row, col, -dr, -dc, player)
+            positive = self._collect_one_direction(row, col, dr, dc, player)
+            line = list(reversed(negative)) + [(row, col)] + positive
+            if len(line) >= self.win_length:
+                return line[: self.win_length]
+        return None
 
     def _count_one_direction(self, row: int, col: int, dr: int, dc: int, player: int) -> int:
         count = 0
@@ -170,6 +176,16 @@ class GomokuEnv:
             r += dr
             c += dc
         return count
+
+    def _collect_one_direction(self, row: int, col: int, dr: int, dc: int, player: int) -> List[Tuple[int, int]]:
+        cells: List[Tuple[int, int]] = []
+        r = row + dr
+        c = col + dc
+        while 0 <= r < self.board_size and 0 <= c < self.board_size and self.board[r, c] == player:
+            cells.append((r, c))
+            r += dr
+            c += dc
+        return cells
 
     def _get_windows(self, board_size: int, win_length: int) -> List[List[Tuple[int, int]]]:
         cache_key = (board_size, win_length)
