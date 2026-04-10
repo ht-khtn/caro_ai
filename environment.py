@@ -102,7 +102,10 @@ class GomokuEnv:
 
         win_line = self._find_winning_line(row, col, player)
         if win_line is not None:
-            reward = 100.0
+            # Keep terminal reward dominant and add a modest faster-win bonus.
+            remaining_cells = (self.board_size * self.board_size) - self.move_count
+            speed_bonus = min(12.0, 12.0 * (remaining_cells / max(1, self.board_size * self.board_size)))
+            reward = 100.0 + speed_bonus
             done = True
             winner = player
             self.done = True
@@ -110,7 +113,10 @@ class GomokuEnv:
             self.last_win_line = win_line
         else:
             reward = self._shape_reward(before_board, self.board, player)
+            reward += self._positional_reward(before_board, row, col, player)
             if self.move_count >= self.board_size * self.board_size:
+                # A draw is better than losing but should still encourage decisive play.
+                reward += 8.0
                 done = True
                 self.done = True
                 self.winner = 0
@@ -136,13 +142,42 @@ class GomokuEnv:
         opp_before = self._count_threats(board_before, -player)
         opp_after = self._count_threats(board_after, -player)
 
-        reward = 0.0
+        reward = -0.2
         reward += 25.0 * max(0, own_after[4] - own_before[4])
         reward += 15.0 * max(0, own_after[3] - own_before[3])
         reward += 2.0 * max(0, own_after[2] - own_before[2])
         reward += 40.0 * max(0, opp_before[4] - opp_after[4])
         reward += 20.0 * max(0, opp_before[3] - opp_after[3])
+
+        # Penalize moves that increase opponent threats.
+        reward -= 45.0 * max(0, opp_after[4] - opp_before[4])
+        reward -= 18.0 * max(0, opp_after[3] - opp_before[3])
         return float(reward)
+
+    def _positional_reward(self, board_before: np.ndarray, row: int, col: int, player: int) -> float:
+        occupied = np.argwhere(board_before != 0)
+        if occupied.size == 0:
+            # Prefer center opening to maximize future branching.
+            center = (self.board_size - 1) / 2.0
+            distance = float(np.sqrt((row - center) ** 2 + (col - center) ** 2))
+            return float(2.5 / (1.0 + distance))
+
+        min_row = int(np.min(occupied[:, 0]))
+        max_row = int(np.max(occupied[:, 0]))
+        min_col = int(np.min(occupied[:, 1]))
+        max_col = int(np.max(occupied[:, 1]))
+        extent = max(max_row - min_row + 1, max_col - min_col + 1)
+        margin = max(1, extent // 3)
+
+        inside = (
+            (min_row - margin) <= row <= (max_row + margin)
+            and (min_col - margin) <= col <= (max_col + margin)
+        )
+        if inside:
+            return 0.8
+
+        # Mild penalty when jumping far outside the active battlefield.
+        return -1.6
 
     def _count_threats(self, board: np.ndarray, player: int) -> Dict[int, int]:
         counts = {2: 0, 3: 0, 4: 0}
