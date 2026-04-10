@@ -3,8 +3,9 @@ from __future__ import annotations
 import pickle
 from collections import deque
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Deque, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Deque, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -65,7 +66,7 @@ def _legal_canvas_actions(legal_moves: Sequence[int], board_size: int, canvas_si
 def _battlefield_context(board: np.ndarray) -> Tuple[Optional[Tuple[float, float]], int, int, int, int, int]:
     occupied = np.argwhere(board != 0)
     if occupied.size == 0:
-        return None, 0, 0, 0, 0
+        return None, 0, 0, 0, 0, 0
 
     min_row = int(np.min(occupied[:, 0]))
     max_row = int(np.max(occupied[:, 0]))
@@ -142,6 +143,123 @@ def _count_connected(board: np.ndarray, row: int, col: int, dr: int, dc: int, pl
     return count
 
 
+@lru_cache(maxsize=16)
+def _line_index_cache(board_size: int) -> Tuple[Tuple[int, ...], ...]:
+    lines: List[Tuple[int, ...]] = []
+
+    for row in range(board_size):
+        lines.append(tuple(row * board_size + col for col in range(board_size)))
+    for col in range(board_size):
+        lines.append(tuple(row * board_size + col for row in range(board_size)))
+
+    for start_col in range(board_size):
+        diagonal: List[int] = []
+        row = 0
+        col = start_col
+        while row < board_size and col < board_size:
+            diagonal.append(row * board_size + col)
+            row += 1
+            col += 1
+        if len(diagonal) >= 5:
+            lines.append(tuple(diagonal))
+    for start_row in range(1, board_size):
+        diagonal = []
+        row = start_row
+        col = 0
+        while row < board_size and col < board_size:
+            diagonal.append(row * board_size + col)
+            row += 1
+            col += 1
+        if len(diagonal) >= 5:
+            lines.append(tuple(diagonal))
+
+    for start_col in range(board_size):
+        diagonal = []
+        row = 0
+        col = start_col
+        while row < board_size and col >= 0:
+            diagonal.append(row * board_size + col)
+            row += 1
+            col -= 1
+        if len(diagonal) >= 5:
+            lines.append(tuple(diagonal))
+    for start_row in range(1, board_size):
+        diagonal = []
+        row = start_row
+        col = board_size - 1
+        while row < board_size and col >= 0:
+            diagonal.append(row * board_size + col)
+            row += 1
+            col -= 1
+        if len(diagonal) >= 5:
+            lines.append(tuple(diagonal))
+
+    return tuple(lines)
+
+
+def _find_one_move_wins(board: np.ndarray, legal_moves: Sequence[int], board_size: int, player: int, win_length: int) -> List[int]:
+    legal_set: Set[int] = {int(move) for move in legal_moves}
+    if not legal_set:
+        return []
+
+    flat = board.reshape(-1)
+    winners: Set[int] = set()
+    for line in _line_index_cache(board_size):
+        if len(line) < win_length:
+            continue
+        values = [int(flat[index]) for index in line]
+        limit = len(line) - win_length + 1
+        for start in range(limit):
+            segment = values[start : start + win_length]
+            player_count = 0
+            empty_count = 0
+            empty_pos = -1
+            blocked = False
+            for offset, cell in enumerate(segment):
+                if cell == int(player):
+                    player_count += 1
+                elif cell == 0:
+                    empty_count += 1
+                    empty_pos = offset
+                else:
+                    blocked = True
+                    break
+            if blocked or player_count != win_length - 1 or empty_count != 1:
+                continue
+            move = int(line[start + empty_pos])
+            if move in legal_set:
+                winners.add(move)
+
+    return list(winners)
+
+
+def _frontier_moves(board: np.ndarray, legal_moves: Sequence[int], board_size: int, radius: int = 2) -> List[int]:
+    legal = [int(move) for move in legal_moves]
+    if not legal:
+        return []
+    if int(np.count_nonzero(board)) == 0:
+        return legal
+
+    legal_set = set(legal)
+    occupied = np.argwhere(board != 0)
+    frontier: Set[int] = set()
+    for row, col in occupied:
+        r0 = max(0, int(row) - radius)
+        r1 = min(board_size - 1, int(row) + radius)
+        c0 = max(0, int(col) - radius)
+        c1 = min(board_size - 1, int(col) + radius)
+        for r in range(r0, r1 + 1):
+            base = r * board_size
+            for c in range(c0, c1 + 1):
+                move = base + c
+                if move in legal_set:
+                    frontier.add(move)
+
+    if len(frontier) >= 4:
+        return list(frontier)
+    return legal
+
+
 def _is_winning_move(board: np.ndarray, move: int, board_size: int, player: int, win_length: int) -> bool:
     row, col = divmod(int(move), int(board_size))
     if int(board[row, col]) != 0:
@@ -160,11 +278,7 @@ def _is_winning_move(board: np.ndarray, move: int, board_size: int, player: int,
 
 
 def _find_immediate_wins(board: np.ndarray, legal_moves: Sequence[int], board_size: int, player: int, win_length: int) -> List[int]:
-    wins: List[int] = []
-    for move in legal_moves:
-        if _is_winning_move(board, int(move), board_size, player, win_length):
-            wins.append(int(move))
-    return wins
+    return _find_one_move_wins(board, legal_moves, board_size, player, win_length)
 
 
 def _find_open_three_end_blocks(board: np.ndarray, legal_moves: Sequence[int], board_size: int, player: int) -> List[int]:
@@ -210,6 +324,121 @@ def _find_open_three_end_blocks(board: np.ndarray, legal_moves: Sequence[int], b
                     threat_blocks.add(int(right_move))
 
     return list(threat_blocks)
+
+
+def _line_length_open_ends(board: np.ndarray, row: int, col: int, dr: int, dc: int, player: int) -> Tuple[int, int]:
+    size = board.shape[0]
+
+    forward = 0
+    r = row + dr
+    c = col + dc
+    while 0 <= r < size and 0 <= c < size and int(board[r, c]) == player:
+        forward += 1
+        r += dr
+        c += dc
+    open_forward = 1 if (0 <= r < size and 0 <= c < size and int(board[r, c]) == 0) else 0
+
+    backward = 0
+    r = row - dr
+    c = col - dc
+    while 0 <= r < size and 0 <= c < size and int(board[r, c]) == player:
+        backward += 1
+        r -= dr
+        c -= dc
+    open_backward = 1 if (0 <= r < size and 0 <= c < size and int(board[r, c]) == 0) else 0
+
+    return 1 + forward + backward, open_forward + open_backward
+
+
+def _max_line_after_move(board: np.ndarray, move: int, board_size: int, player: int) -> Tuple[int, int]:
+    row, col = divmod(int(move), board_size)
+    best_len = 1
+    best_open = 0
+    for dr, dc in ((1, 0), (0, 1), (1, 1), (1, -1)):
+        length, open_ends = _line_length_open_ends(board, row, col, dr, dc, player)
+        if length > best_len or (length == best_len and open_ends > best_open):
+            best_len = length
+            best_open = open_ends
+    return best_len, best_open
+
+
+def _choose_tactical_move(board: np.ndarray, legal_moves: Sequence[int], board_size: int) -> Optional[int]:
+    legal_moves = [int(move) for move in legal_moves]
+    if not legal_moves:
+        return None
+
+    win_length = min(5, board_size)
+
+    winning_moves = _find_immediate_wins(board, legal_moves, board_size, player=1, win_length=win_length)
+    if winning_moves:
+        return _pick_weighted_move(board, board_size, winning_moves)
+
+    block_moves = _find_immediate_wins(board, legal_moves, board_size, player=-1, win_length=win_length)
+    if block_moves:
+        return _pick_weighted_move(board, board_size, block_moves)
+
+    open_three_blocks = _find_open_three_end_blocks(board, legal_moves, board_size, player=-1)
+    if open_three_blocks:
+        return _pick_weighted_move(board, board_size, open_three_blocks)
+
+    candidate_moves = _frontier_moves(board, legal_moves, board_size, radius=2)
+    heuristic = _heuristic_move_bonus(board, board_size, candidate_moves, last_move=None)
+    h_map = {int(move): float(weight) for move, weight in zip(candidate_moves, heuristic)}
+    move_scores: Dict[int, float] = {}
+
+    for move in candidate_moves:
+        temp = board.copy()
+        row, col = divmod(move, board_size)
+        if int(temp[row, col]) != 0:
+            continue
+        temp[row, col] = 1
+        next_legal = [candidate for candidate in candidate_moves if candidate != move and int(temp[candidate // board_size, candidate % board_size]) == 0]
+        if len(next_legal) < 4:
+            next_legal = [candidate for candidate in legal_moves if candidate != move]
+
+        own_next_wins = _find_immediate_wins(temp, next_legal, board_size, player=1, win_length=win_length)
+        opp_next_wins = _find_immediate_wins(temp, next_legal, board_size, player=-1, win_length=win_length)
+
+        score = 0.0
+        if len(own_next_wins) >= 2:
+            score += 9000.0
+        elif len(own_next_wins) == 1:
+            score += 2500.0
+
+        if len(opp_next_wins) == 0:
+            score += 320.0
+        else:
+            score -= 700.0 * float(len(opp_next_wins))
+
+        own_open_three = len(_find_open_three_end_blocks(temp, next_legal, board_size, player=1))
+        opp_open_three = len(_find_open_three_end_blocks(temp, next_legal, board_size, player=-1))
+        score += 50.0 * float(own_open_three)
+        score -= 70.0 * float(opp_open_three)
+
+        max_len, open_ends = _max_line_after_move(temp, move, board_size, player=1)
+        score += 20.0 * float(max_len)
+        score += 10.0 * float(open_ends)
+        if max_len >= 4:
+            score += 180.0
+        elif max_len == 3 and open_ends == 2:
+            score += 120.0
+
+        score += 35.0 * h_map.get(move, 0.0)
+        move_scores[move] = score
+
+    if not move_scores:
+        return None
+
+    best_score = max(move_scores.values())
+    # Keep RL in control when no tactical signal is meaningful.
+    if best_score < 140.0:
+        return None
+
+    best_moves = [move for move, value in move_scores.items() if abs(value - best_score) < 1e-6]
+    if len(best_moves) == 1:
+        return int(best_moves[0])
+
+    return _pick_weighted_move(board, board_size, best_moves)
 
 
 def _pick_weighted_move(board: np.ndarray, board_size: int, moves: Sequence[int]) -> int:
@@ -414,6 +643,7 @@ class QLearningAgent:
         epsilon: float = 1.0,
         epsilon_min: float = 0.02,
         epsilon_decay: float = 0.992,
+        loss_boost: float = 1.45,
     ) -> None:
         self.canvas_size = MAX_BOARD_SIZE
         self.board_size = int(board_size)
@@ -424,6 +654,7 @@ class QLearningAgent:
         self.initial_epsilon = float(epsilon)
         self.epsilon_min = float(epsilon_min)
         self.epsilon_decay = float(epsilon_decay)
+        self.loss_boost = float(max(1.0, loss_boost))
         self.q_table: Dict[bytes, np.ndarray] = {}
         self.total_updates = 0
 
@@ -446,18 +677,9 @@ class QLearningAgent:
         if not legal_moves:
             return 0
 
-        win_length = min(5, self.board_size)
-        winning_moves = _find_immediate_wins(state, legal_moves, self.board_size, player=1, win_length=win_length)
-        if winning_moves:
-            return _pick_weighted_move(state, self.board_size, winning_moves)
-
-        block_moves = _find_immediate_wins(state, legal_moves, self.board_size, player=-1, win_length=win_length)
-        if block_moves:
-            return _pick_weighted_move(state, self.board_size, block_moves)
-
-        open_three_blocks = _find_open_three_end_blocks(state, legal_moves, self.board_size, player=-1)
-        if open_three_blocks:
-            return _pick_weighted_move(state, self.board_size, open_three_blocks)
+        tactical = _choose_tactical_move(state, legal_moves, self.board_size)
+        if tactical is not None:
+            return int(tactical)
 
         legal_canvas_moves = _legal_canvas_actions(legal_moves, self.board_size, self.canvas_size)
         if explore and np.random.random() < self.epsilon:
@@ -510,7 +732,10 @@ class QLearningAgent:
                     target_value = transition.reward + self.gamma * float(np.max(next_q_values[legal_next]))
 
             prediction = float(q_values[action_canvas])
-            updated_q = prediction + self.learning_rate * (target_value - prediction)
+            effective_lr = self.learning_rate
+            if float(transition.reward) < 0.0:
+                effective_lr = min(1.0, self.learning_rate * self.loss_boost)
+            updated_q = prediction + effective_lr * (target_value - prediction)
             q_values[action_canvas] = _safe_clip_scalar(updated_q, MAX_ABS_Q)
             total_loss += abs(target_value - prediction)
 
@@ -528,6 +753,7 @@ class QLearningAgent:
             "epsilon": self.epsilon,
             "epsilon_min": self.epsilon_min,
             "epsilon_decay": self.epsilon_decay,
+            "loss_boost": self.loss_boost,
             "total_updates": self.total_updates,
             "q_table": self.q_table,
         }
@@ -545,6 +771,7 @@ class QLearningAgent:
             epsilon=payload["epsilon"],
             epsilon_min=payload["epsilon_min"],
             epsilon_decay=payload["epsilon_decay"],
+            loss_boost=payload.get("loss_boost", 1.45),
         )
         agent.canvas_size = payload.get("canvas_size", MAX_BOARD_SIZE)
         agent.action_size = agent.canvas_size * agent.canvas_size
@@ -567,6 +794,8 @@ class DQNAgent:
         hidden_layers: Sequence[int] = (256, 128),
         target_update_every: int = 120,
         replay_loops: int = 2,
+        hard_negative_ratio: float = 0.45,
+        hard_negative_reward_cutoff: float = -8.0,
     ) -> None:
         self.canvas_size = MAX_BOARD_SIZE
         self.board_size = int(board_size)
@@ -580,8 +809,11 @@ class DQNAgent:
         self.batch_size = int(batch_size)
         self.target_update_every = int(target_update_every)
         self.replay_loops = int(max(1, replay_loops))
+        self.hard_negative_ratio = float(np.clip(hard_negative_ratio, 0.0, 0.9))
+        self.hard_negative_reward_cutoff = float(hard_negative_reward_cutoff)
         self.hidden_layers = tuple(int(layer) for layer in hidden_layers)
         self.memory: Deque[Transition] = deque(maxlen=int(memory_size))
+        self.hard_negative_memory: Deque[Transition] = deque(maxlen=max(256, int(memory_size // 3)))
         self.model = DenseNetwork(self.action_size, self.hidden_layers, self.action_size)
         self.target_model = self.model.clone()
         self.train_steps = 0
@@ -592,6 +824,7 @@ class DQNAgent:
 
     def reset_knowledge(self) -> None:
         self.memory.clear()
+        self.hard_negative_memory.clear()
         self.model = DenseNetwork(self.action_size, self.hidden_layers, self.action_size)
         self.target_model = self.model.clone()
         self.train_steps = 0
@@ -603,18 +836,9 @@ class DQNAgent:
         if not legal_moves:
             return 0
 
-        win_length = min(5, self.board_size)
-        winning_moves = _find_immediate_wins(state, legal_moves, self.board_size, player=1, win_length=win_length)
-        if winning_moves:
-            return _pick_weighted_move(state, self.board_size, winning_moves)
-
-        block_moves = _find_immediate_wins(state, legal_moves, self.board_size, player=-1, win_length=win_length)
-        if block_moves:
-            return _pick_weighted_move(state, self.board_size, block_moves)
-
-        open_three_blocks = _find_open_three_end_blocks(state, legal_moves, self.board_size, player=-1)
-        if open_three_blocks:
-            return _pick_weighted_move(state, self.board_size, open_three_blocks)
+        tactical = _choose_tactical_move(state, legal_moves, self.board_size)
+        if tactical is not None:
+            return int(tactical)
 
         legal_canvas_moves = _legal_canvas_actions(legal_moves, self.board_size, self.canvas_size)
         if explore and np.random.random() < self.epsilon:
@@ -661,6 +885,17 @@ class DQNAgent:
                     board_size=board_size,
                 )
             )
+            if float(transition.reward) <= self.hard_negative_reward_cutoff:
+                self.hard_negative_memory.append(
+                    Transition(
+                        state=state_variant.astype(np.float32),
+                        action=int(action_variant),
+                        reward=float(transition.reward),
+                        next_state=next_state_variant.astype(np.float32),
+                        done=bool(transition.done),
+                        board_size=board_size,
+                    )
+                )
 
     def learn_from_transition(self, transition: Transition) -> float:
         self.remember(transition)
@@ -674,7 +909,22 @@ class DQNAgent:
             self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
             return 0.0
 
-        batch = [self.memory[index] for index in np.random.choice(len(self.memory), self.batch_size, replace=False)]
+        hard_count = int(round(self.batch_size * self.hard_negative_ratio))
+        hard_count = min(hard_count, len(self.hard_negative_memory), self.batch_size)
+        regular_count = self.batch_size - hard_count
+
+        batch: List[Transition] = []
+        if hard_count > 0:
+            hard_indices = np.random.choice(len(self.hard_negative_memory), hard_count, replace=False)
+            batch.extend(self.hard_negative_memory[index] for index in hard_indices)
+        if regular_count > 0:
+            regular_indices = np.random.choice(len(self.memory), regular_count, replace=False)
+            batch.extend(self.memory[index] for index in regular_indices)
+
+        if len(batch) < self.batch_size:
+            refill = self.batch_size - len(batch)
+            refill_indices = np.random.choice(len(self.memory), refill, replace=False)
+            batch.extend(self.memory[index] for index in refill_indices)
         states = np.vstack([item.state.reshape(1, -1) for item in batch])
         next_states = np.vstack([item.next_state.reshape(1, -1) for item in batch])
         predicted = self.model.predict(states)
@@ -720,6 +970,8 @@ class DQNAgent:
             "hidden_layers": self.hidden_layers,
             "target_update_every": self.target_update_every,
             "replay_loops": self.replay_loops,
+            "hard_negative_ratio": self.hard_negative_ratio,
+            "hard_negative_reward_cutoff": self.hard_negative_reward_cutoff,
             "train_steps": self.train_steps,
             "total_updates": self.total_updates,
             "model_weights": [weight.copy() for weight in self.model.weights],
@@ -745,6 +997,8 @@ class DQNAgent:
             hidden_layers=payload["hidden_layers"],
             target_update_every=payload["target_update_every"],
             replay_loops=payload.get("replay_loops", 2),
+            hard_negative_ratio=payload.get("hard_negative_ratio", 0.45),
+            hard_negative_reward_cutoff=payload.get("hard_negative_reward_cutoff", -8.0),
         )
         agent.canvas_size = payload.get("canvas_size", MAX_BOARD_SIZE)
         agent.action_size = agent.canvas_size * agent.canvas_size
