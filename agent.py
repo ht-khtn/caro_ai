@@ -130,6 +130,51 @@ def _heuristic_move_bonus(board: np.ndarray, board_size: int, legal_moves: Seque
     return weights
 
 
+def _count_connected(board: np.ndarray, row: int, col: int, dr: int, dc: int, player: int) -> int:
+    size = board.shape[0]
+    count = 0
+    r = row + dr
+    c = col + dc
+    while 0 <= r < size and 0 <= c < size and int(board[r, c]) == player:
+        count += 1
+        r += dr
+        c += dc
+    return count
+
+
+def _is_winning_move(board: np.ndarray, move: int, board_size: int, player: int, win_length: int) -> bool:
+    row, col = divmod(int(move), int(board_size))
+    if int(board[row, col]) != 0:
+        return False
+
+    temp = board.copy()
+    temp[row, col] = int(player)
+    directions = ((1, 0), (0, 1), (1, 1), (1, -1))
+    for dr, dc in directions:
+        length = 1
+        length += _count_connected(temp, row, col, dr, dc, int(player))
+        length += _count_connected(temp, row, col, -dr, -dc, int(player))
+        if length >= win_length:
+            return True
+    return False
+
+
+def _find_immediate_wins(board: np.ndarray, legal_moves: Sequence[int], board_size: int, player: int, win_length: int) -> List[int]:
+    wins: List[int] = []
+    for move in legal_moves:
+        if _is_winning_move(board, int(move), board_size, player, win_length):
+            wins.append(int(move))
+    return wins
+
+
+def _pick_weighted_move(board: np.ndarray, board_size: int, moves: Sequence[int]) -> int:
+    moves = list(moves)
+    if len(moves) == 1:
+        return int(moves[0])
+    weights = _heuristic_move_bonus(board, board_size, moves, last_move=None)
+    return int(np.random.choice(moves, p=weights))
+
+
 def _legal_canvas_mask(board_size: int, canvas_size: int = MAX_BOARD_SIZE) -> np.ndarray:
     mask = np.zeros((canvas_size, canvas_size), dtype=np.float32)
     offset = _board_offset(board_size, canvas_size)
@@ -355,6 +400,16 @@ class QLearningAgent:
         legal_moves = list(legal_moves)
         if not legal_moves:
             return 0
+
+        win_length = min(5, self.board_size)
+        winning_moves = _find_immediate_wins(state, legal_moves, self.board_size, player=1, win_length=win_length)
+        if winning_moves:
+            return _pick_weighted_move(state, self.board_size, winning_moves)
+
+        block_moves = _find_immediate_wins(state, legal_moves, self.board_size, player=-1, win_length=win_length)
+        if block_moves:
+            return _pick_weighted_move(state, self.board_size, block_moves)
+
         legal_canvas_moves = _legal_canvas_actions(legal_moves, self.board_size, self.canvas_size)
         if explore and np.random.random() < self.epsilon:
             weights = _heuristic_move_bonus(state, self.board_size, legal_moves, last_move=None)
@@ -498,6 +553,16 @@ class DQNAgent:
         legal_moves = list(legal_moves)
         if not legal_moves:
             return 0
+
+        win_length = min(5, self.board_size)
+        winning_moves = _find_immediate_wins(state, legal_moves, self.board_size, player=1, win_length=win_length)
+        if winning_moves:
+            return _pick_weighted_move(state, self.board_size, winning_moves)
+
+        block_moves = _find_immediate_wins(state, legal_moves, self.board_size, player=-1, win_length=win_length)
+        if block_moves:
+            return _pick_weighted_move(state, self.board_size, block_moves)
+
         legal_canvas_moves = _legal_canvas_actions(legal_moves, self.board_size, self.canvas_size)
         if explore and np.random.random() < self.epsilon:
             weights = _heuristic_move_bonus(state, self.board_size, legal_moves, last_move=None)
