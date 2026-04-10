@@ -207,10 +207,16 @@ class QLearningAgent:
             weights = _center_weights(self.board_size, legal_moves)
             return int(np.random.choice(legal_moves, p=weights))
 
-        q_values = self._get_q_values(state)
+        q_values = np.nan_to_num(self._get_q_values(state), nan=0.0, posinf=0.0, neginf=0.0)
         legal_q = q_values[legal_moves].astype(np.float32)
+        if legal_q.size == 0:
+            return int(np.random.choice(legal_moves))
+
         max_q = float(np.max(legal_q))
-        candidates = [move for move, value in zip(legal_moves, legal_q) if abs(float(value) - max_q) < 1e-6]
+        candidates = [move for move, value in zip(legal_moves, legal_q) if np.isfinite(value) and abs(float(value) - max_q) < 1e-6]
+        if not candidates:
+            best_index = int(np.argmax(legal_q))
+            return int(legal_moves[best_index])
         if len(candidates) == 1:
             return int(candidates[0])
 
@@ -314,10 +320,16 @@ class DQNAgent:
             weights = _center_weights(self.board_size, legal_moves)
             return int(np.random.choice(legal_moves, p=weights))
 
-        q_values = self.model.predict(_state_to_vector(state))[0]
+        q_values = np.nan_to_num(self.model.predict(_state_to_vector(state))[0], nan=0.0, posinf=0.0, neginf=0.0)
         legal_q = q_values[legal_moves].astype(np.float32)
+        if legal_q.size == 0:
+            return int(np.random.choice(legal_moves))
+
         max_q = float(np.max(legal_q))
-        candidates = [move for move, value in zip(legal_moves, legal_q) if abs(float(value) - max_q) < 1e-6]
+        candidates = [move for move, value in zip(legal_moves, legal_q) if np.isfinite(value) and abs(float(value) - max_q) < 1e-6]
+        if not candidates:
+            best_index = int(np.argmax(legal_q))
+            return int(legal_moves[best_index])
         if len(candidates) == 1:
             return int(candidates[0])
 
