@@ -167,6 +167,51 @@ def _find_immediate_wins(board: np.ndarray, legal_moves: Sequence[int], board_si
     return wins
 
 
+def _find_open_three_end_blocks(board: np.ndarray, legal_moves: Sequence[int], board_size: int, player: int) -> List[int]:
+    legal_set = {int(move) for move in legal_moves}
+    if not legal_set:
+        return []
+
+    threat_blocks: set[int] = set()
+    directions = ((1, 0), (0, 1), (1, 1), (1, -1))
+    for row in range(board_size):
+        for col in range(board_size):
+            if int(board[row, col]) != int(player):
+                continue
+            for dr, dc in directions:
+                prev_r = row - dr
+                prev_c = col - dc
+                if 0 <= prev_r < board_size and 0 <= prev_c < board_size and int(board[prev_r, prev_c]) == int(player):
+                    continue
+
+                r1 = row + dr
+                c1 = col + dc
+                r2 = row + 2 * dr
+                c2 = col + 2 * dc
+                if not (0 <= r1 < board_size and 0 <= c1 < board_size and 0 <= r2 < board_size and 0 <= c2 < board_size):
+                    continue
+                if int(board[r1, c1]) != int(player) or int(board[r2, c2]) != int(player):
+                    continue
+
+                left_r = row - dr
+                left_c = col - dc
+                right_r = row + 3 * dr
+                right_c = col + 3 * dc
+                if not (0 <= left_r < board_size and 0 <= left_c < board_size and 0 <= right_r < board_size and 0 <= right_c < board_size):
+                    continue
+                if int(board[left_r, left_c]) != 0 or int(board[right_r, right_c]) != 0:
+                    continue
+
+                left_move = left_r * board_size + left_c
+                right_move = right_r * board_size + right_c
+                if left_move in legal_set:
+                    threat_blocks.add(int(left_move))
+                if right_move in legal_set:
+                    threat_blocks.add(int(right_move))
+
+    return list(threat_blocks)
+
+
 def _pick_weighted_move(board: np.ndarray, board_size: int, moves: Sequence[int]) -> int:
     moves = list(moves)
     if len(moves) == 1:
@@ -410,6 +455,10 @@ class QLearningAgent:
         if block_moves:
             return _pick_weighted_move(state, self.board_size, block_moves)
 
+        open_three_blocks = _find_open_three_end_blocks(state, legal_moves, self.board_size, player=-1)
+        if open_three_blocks:
+            return _pick_weighted_move(state, self.board_size, open_three_blocks)
+
         legal_canvas_moves = _legal_canvas_actions(legal_moves, self.board_size, self.canvas_size)
         if explore and np.random.random() < self.epsilon:
             weights = _heuristic_move_bonus(state, self.board_size, legal_moves, last_move=None)
@@ -562,6 +611,10 @@ class DQNAgent:
         block_moves = _find_immediate_wins(state, legal_moves, self.board_size, player=-1, win_length=win_length)
         if block_moves:
             return _pick_weighted_move(state, self.board_size, block_moves)
+
+        open_three_blocks = _find_open_three_end_blocks(state, legal_moves, self.board_size, player=-1)
+        if open_three_blocks:
+            return _pick_weighted_move(state, self.board_size, open_three_blocks)
 
         legal_canvas_moves = _legal_canvas_actions(legal_moves, self.board_size, self.canvas_size)
         if explore and np.random.random() < self.epsilon:
