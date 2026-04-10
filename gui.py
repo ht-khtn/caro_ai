@@ -38,9 +38,9 @@ class GomokuApp(ctk.CTk):
         self.stats_var = ctk.StringVar(value="Episodes: 0 | Moves: 0 | Epsilon: 1.00")
         self.score_var = ctk.StringVar(value="P1 Wins: 0 | P2 Wins: 0 | Draws: 0")
         self.turn_var = ctk.StringVar(value="Current turn: X")
-        self.x_score_var = ctk.StringVar(value="X: 0")
-        self.o_score_var = ctk.StringVar(value="O: 0")
-        self.ai_level_var = ctk.StringVar(value="AI Level: Fresh")
+        self.x_score_var = ctk.StringVar(value="0")
+        self.o_score_var = ctk.StringVar(value="0")
+        self.ai_level_var = ctk.StringVar(value="0/100")
         self.center_focus_var = ctk.StringVar(value="Center focus: 0%")
 
         self.is_running = False
@@ -149,32 +149,22 @@ class GomokuApp(ctk.CTk):
         self.speed_value_label = ctk.CTkLabel(self.settings_scroll, text="350 ms between AI moves", text_color="#B8C4D6")
         self.speed_value_label.pack(padx=14, pady=(0, 14), anchor="w")
 
-        self._add_section_label(self.settings_scroll, "Live Status", "Theo doi trang thai van, luot hien tai va thong ke huan luyen.")
-        self.status_label = ctk.CTkLabel(self.settings_scroll, textvariable=self.status_var, wraplength=290, justify="left", text_color="#DCE7F5")
-        self.status_label.pack(fill="x", padx=14, pady=(0, 8), anchor="w")
-        self.turn_label = ctk.CTkLabel(self.settings_scroll, textvariable=self.turn_var, wraplength=290, justify="left", text_color="#8AD4FF")
-        self.turn_label.pack(fill="x", padx=14, pady=(0, 8), anchor="w")
-
-        self.stats_label = ctk.CTkLabel(self.settings_scroll, textvariable=self.stats_var, wraplength=290, justify="left", text_color="#B8C4D6")
-        self.stats_label.pack(fill="x", padx=14, pady=(0, 2), anchor="w")
-        self.score_label = ctk.CTkLabel(self.settings_scroll, textvariable=self.score_var, wraplength=290, justify="left", text_color="#B8C4D6")
-        self.score_label.pack(fill="x", padx=14, pady=(0, 16), anchor="w")
-
-        toolbar = ctk.CTkFrame(self.main, corner_radius=14)
-        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=18, pady=(14, 8))
+        toolbar = ctk.CTkFrame(self.main, corner_radius=14, fg_color="transparent")
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=18, pady=(10, 6))
         for col in range(5):
             toolbar.grid_columnconfigure(col, weight=1)
 
-        self.start_button = ctk.CTkButton(toolbar, text="▶", width=56, command=self._toggle_running)
-        self.start_button.grid(row=0, column=0, padx=6, pady=8)
-        self.reset_button = ctk.CTkButton(toolbar, text="↺", width=56, command=self._reset_game)
-        self.reset_button.grid(row=0, column=1, padx=6, pady=8)
-        self.save_button = ctk.CTkButton(toolbar, text="💾", width=56, command=self._save_model)
-        self.save_button.grid(row=0, column=2, padx=6, pady=8)
-        self.load_button = ctk.CTkButton(toolbar, text="📂", width=56, command=self._load_model)
-        self.load_button.grid(row=0, column=3, padx=6, pady=8)
+        button_style = dict(width=42, height=34, fg_color="transparent", hover_color="#263243", text_color="#EAF2FF")
+        self.start_button = ctk.CTkButton(toolbar, text="▶", command=self._toggle_running, **button_style)
+        self.start_button.grid(row=0, column=1, padx=3, pady=4)
+        self.reset_button = ctk.CTkButton(toolbar, text="↺", command=self._reset_game, **button_style)
+        self.reset_button.grid(row=0, column=2, padx=3, pady=4)
+        self.save_button = ctk.CTkButton(toolbar, text="💾", command=self._save_model, **button_style)
+        self.save_button.grid(row=0, column=3, padx=3, pady=4)
+        self.load_button = ctk.CTkButton(toolbar, text="📂", command=self._load_model, **button_style)
+        self.load_button.grid(row=0, column=4, padx=3, pady=4)
         self.mode_hint = ctk.CTkLabel(toolbar, text="Controls", text_color="#9AB2D9")
-        self.mode_hint.grid(row=0, column=4, sticky="e", padx=(6, 10))
+        self.mode_hint.grid(row=0, column=0, sticky="w", padx=(10, 6))
 
         self.board_container = ctk.CTkFrame(self.main, corner_radius=18)
         self.board_container.grid(row=1, column=0, sticky="nsew", padx=(18, 10), pady=18)
@@ -183,6 +173,15 @@ class GomokuApp(ctk.CTk):
         self.right_panel = ctk.CTkFrame(self.main, width=250, corner_radius=18)
         self.right_panel.grid(row=1, column=1, sticky="ns", padx=(10, 18), pady=18)
         self.right_panel.grid_propagate(False)
+
+        live_title = ctk.CTkLabel(self.right_panel, text="Live Status", font=ctk.CTkFont(size=20, weight="bold"))
+        live_title.pack(padx=14, pady=(16, 8), anchor="w")
+        self.status_label = ctk.CTkLabel(self.right_panel, textvariable=self.status_var, wraplength=210, justify="left", text_color="#DCE7F5")
+        self.status_label.pack(fill="x", padx=14, pady=(0, 8), anchor="w")
+        self.turn_label = ctk.CTkLabel(self.right_panel, textvariable=self.turn_var, wraplength=210, justify="left", text_color="#8AD4FF")
+        self.turn_label.pack(fill="x", padx=14, pady=(0, 8), anchor="w")
+        self.stats_label = ctk.CTkLabel(self.right_panel, textvariable=self.stats_var, wraplength=210, justify="left", text_color="#B8C4D6")
+        self.stats_label.pack(fill="x", padx=14, pady=(0, 10), anchor="w")
 
         self.canvas = Canvas(
             self.board_container,
@@ -194,11 +193,17 @@ class GomokuApp(ctk.CTk):
         self.canvas.pack(fill="both", expand=True, padx=16, pady=16)
 
         score_title = ctk.CTkLabel(self.right_panel, text="Match Score", font=ctk.CTkFont(size=20, weight="bold"))
-        score_title.pack(padx=14, pady=(18, 10), anchor="w")
-        x_score_label = ctk.CTkLabel(self.right_panel, textvariable=self.x_score_var, text_color="#E74C3C", font=ctk.CTkFont(size=18, weight="bold"))
-        x_score_label.pack(padx=14, pady=(0, 4), anchor="w")
-        o_score_label = ctk.CTkLabel(self.right_panel, textvariable=self.o_score_var, text_color="#3498DB", font=ctk.CTkFont(size=18, weight="bold"))
-        o_score_label.pack(padx=14, pady=(0, 18), anchor="w")
+        score_title.pack(padx=14, pady=(8, 10), anchor="w")
+        score_row = ctk.CTkFrame(self.right_panel, fg_color="transparent")
+        score_row.pack(fill="x", padx=14, pady=(0, 14))
+        x_box = ctk.CTkFrame(score_row, fg_color="transparent")
+        x_box.pack(side="left", expand=True, fill="x", padx=(0, 8))
+        o_box = ctk.CTkFrame(score_row, fg_color="transparent")
+        o_box.pack(side="left", expand=True, fill="x", padx=(8, 0))
+        ctk.CTkLabel(x_box, text="X", text_color="#E74C3C", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="center")
+        ctk.CTkLabel(x_box, textvariable=self.x_score_var, text_color="#E74C3C", font=ctk.CTkFont(size=30, weight="bold")).pack(anchor="center")
+        ctk.CTkLabel(o_box, text="O", text_color="#3498DB", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="center")
+        ctk.CTkLabel(o_box, textvariable=self.o_score_var, text_color="#3498DB", font=ctk.CTkFont(size=30, weight="bold")).pack(anchor="center")
 
         train_title = ctk.CTkLabel(self.right_panel, text="AI Training", font=ctk.CTkFont(size=20, weight="bold"))
         train_title.pack(padx=14, pady=(6, 10), anchor="w")
@@ -293,23 +298,10 @@ class GomokuApp(ctk.CTk):
 
     def _apply_board_size(self) -> None:
         size = int(self.board_size_var.get())
-        algorithm = self.algorithm_var.get().lower().strip()
-        if algorithm == "q-learning":
-            algorithm = "q_learning"
         self.env = GomokuEnv(board_size=size)
-        self.agent = create_agent(board_size=size, algorithm=algorithm)
+        if hasattr(self.agent, "set_board_size"):
+            self.agent.set_board_size(size)
         self.pending_transitions = {1: None, -1: None}
-        self.total_episodes = 0
-        self.total_moves = 0
-        self.p1_wins = 0
-        self.p2_wins = 0
-        self.draws = 0
-        self.ai_wins = 0
-        self.ai_losses = 0
-        self.human_wins = 0
-        self.human_losses = 0
-        self.center_opening_hits = 0
-        self.center_opening_samples = 0
         self.last_move = None
         self.win_line_cells = None
         self.show_win_line = False
@@ -317,7 +309,7 @@ class GomokuApp(ctk.CTk):
         self.finish_scheduled = False
         self.is_running = False
         self._refresh_start_icon()
-        self.status_var.set(f"Applied {size} x {size} board. New model initialized from scratch.")
+        self.status_var.set(f"Applied {size} x {size} board. Learned knowledge preserved.")
         self._refresh_turn_label()
         self._update_statistics()
         self._refresh_board()
@@ -436,7 +428,7 @@ class GomokuApp(ctk.CTk):
         state = self.env.get_perspective_board(player)
         result = self.env.step(action)
         next_state = self.env.get_perspective_board(-player) if not result.done else np.zeros_like(state)
-        transition = Transition(state=state, action=int(action), reward=float(result.reward), next_state=next_state, done=bool(result.done))
+        transition = Transition(state=state, action=int(action), reward=float(result.reward), next_state=next_state, done=bool(result.done), board_size=self.env.board_size)
 
         ai_player = 1 if self.human_side_var.get() == "Second" else -1
         if self.mode_var.get() == "Training":
@@ -612,20 +604,18 @@ class GomokuApp(ctk.CTk):
         else:
             self.score_var.set(f"P1 Wins: {self.p1_wins} | P2 Wins: {self.p2_wins} | Draws: {self.draws}")
 
-        self.x_score_var.set(f"X: {self.p1_wins}")
-        self.o_score_var.set(f"O: {self.p2_wins}")
-        self.ai_level_var.set(self._estimate_ai_level(epsilon, updates))
+        self.x_score_var.set(str(self.p1_wins))
+        self.o_score_var.set(str(self.p2_wins))
+        self.ai_level_var.set(f"{self._estimate_ai_level(epsilon, updates)}/100")
         center_ratio = 0.0 if self.center_opening_samples == 0 else (self.center_opening_hits / self.center_opening_samples) * 100.0
         self.center_focus_var.set(f"Center focus: {center_ratio:.1f}% (opening AI moves)")
 
-    def _estimate_ai_level(self, epsilon: float, updates: int) -> str:
-        if updates < 250 or epsilon > 0.75:
-            return "AI Level: Beginner"
-        if updates < 1200 or epsilon > 0.35:
-            return "AI Level: Developing"
-        if updates < 4000 or epsilon > 0.12:
-            return "AI Level: Skilled"
-        return "AI Level: Strong"
+    def _estimate_ai_level(self, epsilon: float, updates: int) -> int:
+        update_score = min(60.0, updates / 50.0)
+        confidence_score = max(0.0, 25.0 * (1.0 - min(1.0, epsilon)))
+        center_ratio = 0.0 if self.center_opening_samples == 0 else (self.center_opening_hits / self.center_opening_samples) * 100.0
+        center_score = min(15.0, center_ratio * 0.15)
+        return int(round(min(100.0, update_score + confidence_score + center_score)))
 
     def _refresh_board(self) -> None:
         self.canvas.delete("all")
@@ -740,6 +730,8 @@ class GomokuApp(ctk.CTk):
             self.win_line_cells = None
             self.show_win_line = False
             self._refresh_start_icon()
+            if hasattr(self.agent, "set_board_size"):
+                self.agent.set_board_size(board_size)
             self.status_var.set(f"Loaded model from {os.path.basename(file_path)}")
             self._refresh_board()
             self._refresh_turn_label()

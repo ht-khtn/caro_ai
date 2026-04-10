@@ -8,6 +8,8 @@ from typing import Deque, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+MAX_BOARD_SIZE = 15
+
 
 @dataclass
 class Transition:
@@ -16,10 +18,113 @@ class Transition:
     reward: float
     next_state: np.ndarray
     done: bool
+    board_size: int = MAX_BOARD_SIZE
 
 
-def _state_to_vector(state: np.ndarray) -> np.ndarray:
-    return state.astype(np.float32).reshape(1, -1)
+def _state_to_vector(state: np.ndarray, board_size: int) -> np.ndarray:
+    return _embed_board(state, board_size).astype(np.float32).reshape(1, -1)
+
+
+def _board_offset(board_size: int, canvas_size: int = MAX_BOARD_SIZE) -> int:
+    return max(0, (canvas_size - int(board_size)) // 2)
+
+
+def _embed_board(board: np.ndarray, board_size: int, canvas_size: int = MAX_BOARD_SIZE) -> np.ndarray:
+    canvas = np.zeros((canvas_size, canvas_size), dtype=np.int8)
+    offset = _board_offset(board_size, canvas_size)
+    canvas[offset : offset + board_size, offset : offset + board_size] = board.astype(np.int8)
+    return canvas
+
+
+def _board_action_to_canvas(action: int, board_size: int, canvas_size: int = MAX_BOARD_SIZE) -> int:
+    offset = _board_offset(board_size, canvas_size)
+    row, col = divmod(int(action), int(board_size))
+    return (row + offset) * canvas_size + (col + offset)
+
+
+def _canvas_action_to_board(action: int, board_size: int, canvas_size: int = MAX_BOARD_SIZE) -> int:
+    offset = _board_offset(board_size, canvas_size)
+    row, col = divmod(int(action), canvas_size)
+    return (row - offset) * board_size + (col - offset)
+
+
+def _legal_canvas_actions(legal_moves: Sequence[int], board_size: int, canvas_size: int = MAX_BOARD_SIZE) -> List[int]:
+    return [_board_action_to_canvas(move, board_size, canvas_size) for move in legal_moves]
+
+
+def _battlefield_context(board: np.ndarray) -> Tuple[Optional[Tuple[float, float]], int, int, int, int, int]:
+    occupied = np.argwhere(board != 0)
+    if occupied.size == 0:
+        return None, 0, 0, 0, 0
+
+    min_row = int(np.min(occupied[:, 0]))
+    max_row = int(np.max(occupied[:, 0]))
+    min_col = int(np.min(occupied[:, 1]))
+    max_col = int(np.max(occupied[:, 1]))
+    center = ((min_row + max_row) / 2.0, (min_col + max_col) / 2.0)
+    extent = max(max_row - min_row + 1, max_col - min_col + 1)
+    return center, extent, min_row, max_row, min_col, max_col
+
+
+def _battlefield_move_weights(board: np.ndarray, legal_moves: Sequence[int], board_size: int, last_move: Optional[Tuple[int, int]] = None) -> np.ndarray:
+    legal_moves = list(legal_moves)
+    if not legal_moves:
+        return np.array([], dtype=np.float32)
+
+    if np.count_nonzero(board) == 0:
+        return _center_weights(board_size, legal_moves)
+
+    context = _battlefield_context(board)
+    if context[0] is None:
+        return _center_weights(board_size, legal_moves)
+
+    battlefield_center, extent, min_row, max_row, min_col, max_col = context
+    assert battlefield_center is not None
+    center_row, center_col = battlefield_center
+    local_anchor = last_move if last_move is not None else battlefield_center
+    anchor_row, anchor_col = local_anchor
+    expanded_margin = max(1, extent // 3)
+    outer_row_min = max(0, min_row - expanded_margin)
+    outer_row_max = min(board_size - 1, max_row + expanded_margin)
+    outer_col_min = max(0, min_col - expanded_margin)
+    outer_col_max = min(board_size - 1, max_col + expanded_margin)
+
+    weights: List[float] = []
+    for move in legal_moves:
+        row, col = divmod(int(move), board_size)
+        distance_to_anchor = np.sqrt((row - anchor_row) ** 2 + (col - anchor_col) ** 2)
+        distance_to_center = np.sqrt((row - center_row) ** 2 + (col - center_col) ** 2)
+        inside_battlefield = outer_row_min <= row <= outer_row_max and outer_col_min <= col <= outer_col_max
+
+        anchor_scale = max(1.0, extent / 2.0)
+        center_scale = max(1.0, extent / 1.5)
+        score = np.exp(-distance_to_anchor / anchor_scale) * 0.75 + np.exp(-distance_to_center / center_scale) * 0.25
+        if inside_battlefield:
+            score *= 1.35
+        else:
+            score *= 0.65
+        weights.append(float(score))
+
+    arr = np.asarray(weights, dtype=np.float32)
+    total = float(np.sum(arr))
+    if not np.isfinite(total) or total <= 0.0:
+        return _center_weights(board_size, legal_moves)
+    arr /= total
+    return arr
+
+
+def _heuristic_move_bonus(board: np.ndarray, board_size: int, legal_moves: Sequence[int], last_move: Optional[Tuple[int, int]] = None) -> np.ndarray:
+    weights = _battlefield_move_weights(board, legal_moves, board_size, last_move=last_move)
+    if weights.size == 0:
+        return weights
+    return weights
+
+
+def _legal_canvas_mask(board_size: int, canvas_size: int = MAX_BOARD_SIZE) -> np.ndarray:
+    mask = np.zeros((canvas_size, canvas_size), dtype=np.float32)
+    offset = _board_offset(board_size, canvas_size)
+    mask[offset : offset + board_size, offset : offset + board_size] = 1.0
+    return mask.reshape(-1)
 
 
 def _center_weights(board_size: int, legal_moves: Sequence[int]) -> np.ndarray:
@@ -183,8 +288,9 @@ class QLearningAgent:
         epsilon_min: float = 0.05,
         epsilon_decay: float = 0.995,
     ) -> None:
+        self.canvas_size = MAX_BOARD_SIZE
         self.board_size = int(board_size)
-        self.action_size = self.board_size * self.board_size
+        self.action_size = self.canvas_size * self.canvas_size
         self.learning_rate = float(learning_rate)
         self.gamma = float(gamma)
         self.epsilon = float(epsilon)
@@ -193,8 +299,11 @@ class QLearningAgent:
         self.q_table: Dict[bytes, np.ndarray] = {}
         self.total_updates = 0
 
+    def set_board_size(self, board_size: int) -> None:
+        self.board_size = int(board_size)
+
     def _get_q_values(self, state: np.ndarray) -> np.ndarray:
-        key = state.astype(np.int8).tobytes()
+        key = _embed_board(state, self.board_size, self.canvas_size).astype(np.int8).tobytes()
         if key not in self.q_table:
             self.q_table[key] = np.zeros(self.action_size, dtype=np.float32)
         return self.q_table[key]
@@ -203,47 +312,58 @@ class QLearningAgent:
         legal_moves = list(legal_moves)
         if not legal_moves:
             return 0
+        legal_canvas_moves = _legal_canvas_actions(legal_moves, self.board_size, self.canvas_size)
         if explore and np.random.random() < self.epsilon:
-            weights = _center_weights(self.board_size, legal_moves)
-            return int(np.random.choice(legal_moves, p=weights))
+            weights = _heuristic_move_bonus(state, self.board_size, legal_moves, last_move=None)
+            chosen_canvas = int(np.random.choice(legal_canvas_moves, p=weights))
+            return int(_canvas_action_to_board(chosen_canvas, self.board_size, self.canvas_size))
 
         q_values = np.nan_to_num(self._get_q_values(state), nan=0.0, posinf=0.0, neginf=0.0)
-        legal_q = q_values[legal_moves].astype(np.float32)
+        legal_q = q_values[legal_canvas_moves].astype(np.float32)
         if legal_q.size == 0:
             return int(np.random.choice(legal_moves))
 
         max_q = float(np.max(legal_q))
-        candidates = [move for move, value in zip(legal_moves, legal_q) if np.isfinite(value) and abs(float(value) - max_q) < 1e-6]
+        candidates = [move for move, value in zip(legal_canvas_moves, legal_q) if np.isfinite(value) and abs(float(value) - max_q) < 1e-6]
         if not candidates:
-            best_index = int(np.argmax(legal_q))
-            return int(legal_moves[best_index])
+            heuristic = _heuristic_move_bonus(state, self.board_size, legal_moves, last_move=None)
+            blended = legal_q + 0.15 * heuristic
+            best_index = int(np.argmax(blended))
+            return int(_canvas_action_to_board(legal_canvas_moves[best_index], self.board_size, self.canvas_size))
         if len(candidates) == 1:
-            return int(candidates[0])
+            return int(_canvas_action_to_board(candidates[0], self.board_size, self.canvas_size))
 
-        weights = _center_weights(self.board_size, candidates)
-        return int(np.random.choice(candidates, p=weights))
+        candidate_board_moves = [_canvas_action_to_board(move, self.board_size, self.canvas_size) for move in candidates]
+        weights = _heuristic_move_bonus(state, self.board_size, candidate_board_moves, last_move=None)
+        chosen_canvas = int(np.random.choice(candidates, p=weights))
+        return int(_canvas_action_to_board(chosen_canvas, self.board_size, self.canvas_size))
 
     def learn_transition(self, transition: Transition) -> float:
         total_loss = 0.0
+        board_size = int(transition.board_size or self.board_size)
+        state_canvas = _embed_board(transition.state, board_size, self.canvas_size)
+        next_state_canvas = _embed_board(transition.next_state, board_size, self.canvas_size)
         for transform_id in range(8):
             state_variant = transform_board(transition.state, transform_id)
             next_state_variant = transform_board(transition.next_state, transform_id)
-            action_variant = transform_action(transition.action, self.board_size, transform_id)
-            state_key = state_variant.astype(np.int8).tobytes()
+            action_variant = transform_action(transition.action, board_size, transform_id)
+            state_key = transform_board(state_canvas, transform_id).astype(np.int8).tobytes()
             q_values = self.q_table.setdefault(state_key, np.zeros(self.action_size, dtype=np.float32))
-            next_q_values = self._get_q_values(next_state_variant)
+            next_q_values = self.q_table.setdefault(transform_board(next_state_canvas, transform_id).astype(np.int8).tobytes(), np.zeros(self.action_size, dtype=np.float32))
+            action_canvas = _board_action_to_canvas(action_variant, board_size, self.canvas_size)
 
             if transition.done:
                 target_value = transition.reward
             else:
-                legal_next = np.flatnonzero(next_state_variant.reshape(-1) == 0)
+                board_region = _legal_canvas_mask(board_size, self.canvas_size)
+                legal_next = np.flatnonzero((transform_board(next_state_canvas, transform_id).reshape(-1) == 0) & (board_region > 0))
                 if legal_next.size == 0:
                     target_value = transition.reward
                 else:
                     target_value = transition.reward + self.gamma * float(np.max(next_q_values[legal_next]))
 
-            prediction = float(q_values[action_variant])
-            q_values[action_variant] = prediction + self.learning_rate * (target_value - prediction)
+            prediction = float(q_values[action_canvas])
+            q_values[action_canvas] = prediction + self.learning_rate * (target_value - prediction)
             total_loss += abs(target_value - prediction)
 
         self.total_updates += 1
@@ -254,6 +374,7 @@ class QLearningAgent:
         payload = {
             "type": "q_learning",
             "board_size": self.board_size,
+            "canvas_size": self.canvas_size,
             "learning_rate": self.learning_rate,
             "gamma": self.gamma,
             "epsilon": self.epsilon,
@@ -277,6 +398,8 @@ class QLearningAgent:
             epsilon_min=payload["epsilon_min"],
             epsilon_decay=payload["epsilon_decay"],
         )
+        agent.canvas_size = payload.get("canvas_size", MAX_BOARD_SIZE)
+        agent.action_size = agent.canvas_size * agent.canvas_size
         agent.total_updates = payload.get("total_updates", 0)
         agent.q_table = payload["q_table"]
         return agent
@@ -296,8 +419,9 @@ class DQNAgent:
         hidden_layers: Sequence[int] = (256, 128),
         target_update_every: int = 250,
     ) -> None:
+        self.canvas_size = MAX_BOARD_SIZE
         self.board_size = int(board_size)
-        self.action_size = self.board_size * self.board_size
+        self.action_size = self.canvas_size * self.canvas_size
         self.learning_rate = float(learning_rate)
         self.gamma = float(gamma)
         self.epsilon = float(epsilon)
@@ -312,35 +436,47 @@ class DQNAgent:
         self.train_steps = 0
         self.total_updates = 0
 
+    def set_board_size(self, board_size: int) -> None:
+        self.board_size = int(board_size)
+
     def choose_action(self, state: np.ndarray, legal_moves: Sequence[int], explore: bool = True) -> int:
         legal_moves = list(legal_moves)
         if not legal_moves:
             return 0
+        legal_canvas_moves = _legal_canvas_actions(legal_moves, self.board_size, self.canvas_size)
         if explore and np.random.random() < self.epsilon:
-            weights = _center_weights(self.board_size, legal_moves)
-            return int(np.random.choice(legal_moves, p=weights))
+            weights = _heuristic_move_bonus(state, self.board_size, legal_moves, last_move=None)
+            chosen_canvas = int(np.random.choice(legal_canvas_moves, p=weights))
+            return int(_canvas_action_to_board(chosen_canvas, self.board_size, self.canvas_size))
 
-        q_values = np.nan_to_num(self.model.predict(_state_to_vector(state))[0], nan=0.0, posinf=0.0, neginf=0.0)
-        legal_q = q_values[legal_moves].astype(np.float32)
+        q_values = np.nan_to_num(self.model.predict(_state_to_vector(state, self.board_size))[0], nan=0.0, posinf=0.0, neginf=0.0)
+        legal_q = q_values[legal_canvas_moves].astype(np.float32)
         if legal_q.size == 0:
             return int(np.random.choice(legal_moves))
 
         max_q = float(np.max(legal_q))
-        candidates = [move for move, value in zip(legal_moves, legal_q) if np.isfinite(value) and abs(float(value) - max_q) < 1e-6]
+        candidates = [move for move, value in zip(legal_canvas_moves, legal_q) if np.isfinite(value) and abs(float(value) - max_q) < 1e-6]
         if not candidates:
-            best_index = int(np.argmax(legal_q))
-            return int(legal_moves[best_index])
+            heuristic = _heuristic_move_bonus(state, self.board_size, legal_moves, last_move=None)
+            blended = legal_q + 0.15 * heuristic
+            best_index = int(np.argmax(blended))
+            return int(_canvas_action_to_board(legal_canvas_moves[best_index], self.board_size, self.canvas_size))
         if len(candidates) == 1:
-            return int(candidates[0])
+            return int(_canvas_action_to_board(candidates[0], self.board_size, self.canvas_size))
 
-        weights = _center_weights(self.board_size, candidates)
-        return int(np.random.choice(candidates, p=weights))
+        candidate_board_moves = [_canvas_action_to_board(move, self.board_size, self.canvas_size) for move in candidates]
+        weights = _heuristic_move_bonus(state, self.board_size, candidate_board_moves, last_move=None)
+        chosen_canvas = int(np.random.choice(candidates, p=weights))
+        return int(_canvas_action_to_board(chosen_canvas, self.board_size, self.canvas_size))
 
     def remember(self, transition: Transition) -> None:
+        board_size = int(transition.board_size or self.board_size)
+        state_canvas = _embed_board(transition.state, board_size, self.canvas_size)
+        next_state_canvas = _embed_board(transition.next_state, board_size, self.canvas_size)
         for transform_id in range(8):
-            state_variant = transform_board(transition.state, transform_id)
-            next_state_variant = transform_board(transition.next_state, transform_id)
-            action_variant = transform_action(transition.action, self.board_size, transform_id)
+            state_variant = transform_board(state_canvas, transform_id)
+            next_state_variant = transform_board(next_state_canvas, transform_id)
+            action_variant = _board_action_to_canvas(transform_action(transition.action, board_size, transform_id), board_size, self.canvas_size)
             self.memory.append(
                 Transition(
                     state=state_variant.astype(np.float32),
@@ -348,6 +484,7 @@ class DQNAgent:
                     reward=float(transition.reward),
                     next_state=next_state_variant.astype(np.float32),
                     done=bool(transition.done),
+                    board_size=board_size,
                 )
             )
 
@@ -361,17 +498,18 @@ class DQNAgent:
             return 0.0
 
         batch = [self.memory[index] for index in np.random.choice(len(self.memory), self.batch_size, replace=False)]
-        states = np.vstack([_state_to_vector(item.state) for item in batch])
-        next_states = np.vstack([_state_to_vector(item.next_state) for item in batch])
+        states = np.vstack([item.state.reshape(1, -1) for item in batch])
+        next_states = np.vstack([item.next_state.reshape(1, -1) for item in batch])
         predicted = self.model.predict(states)
         targets = predicted.copy()
         next_q_values = self.target_model.predict(next_states)
 
         for row_index, item in enumerate(batch):
+            board_region = _legal_canvas_mask(int(item.board_size or self.board_size), self.canvas_size)
             if item.done:
                 target_value = item.reward
             else:
-                legal_next = np.flatnonzero(item.next_state.reshape(-1) == 0)
+                legal_next = np.flatnonzero((item.next_state.reshape(-1) == 0) & (board_region > 0))
                 if legal_next.size == 0:
                     target_value = item.reward
                 else:
@@ -391,6 +529,7 @@ class DQNAgent:
         payload = {
             "type": "dqn",
             "board_size": self.board_size,
+            "canvas_size": self.canvas_size,
             "learning_rate": self.learning_rate,
             "gamma": self.gamma,
             "epsilon": self.epsilon,
@@ -424,6 +563,8 @@ class DQNAgent:
             hidden_layers=payload["hidden_layers"],
             target_update_every=payload["target_update_every"],
         )
+        agent.canvas_size = payload.get("canvas_size", MAX_BOARD_SIZE)
+        agent.action_size = agent.canvas_size * agent.canvas_size
         agent.train_steps = payload.get("train_steps", 0)
         agent.total_updates = payload.get("total_updates", 0)
         agent.model.weights = [weight.copy() for weight in payload["model_weights"]]
