@@ -35,6 +35,7 @@ class GomokuApp(ctk.CTk):
         self.board_size_display_var = ctk.StringVar(value="15 x 15")
         self.status_var = ctk.StringVar(value="Ready")
         self.move_delay_var = ctk.DoubleVar(value=140)
+        self.no_ui_var = ctk.BooleanVar(value=False)
         self.stats_var = ctk.StringVar(value="Episodes: 0 | Moves: 0 | Epsilon: 1.00")
         self.score_var = ctk.StringVar(value="P1 Wins: 0 | P2 Wins: 0 | Draws: 0")
         self.turn_var = ctk.StringVar(value="Current turn: X")
@@ -62,6 +63,7 @@ class GomokuApp(ctk.CTk):
         self.center_opening_hits = 0
         self.center_opening_samples = 0
         self.board_pixel_size = 720
+        self._ui_tick_counter = 0
         self._tooltip_window: Optional[Toplevel] = None
         self._tooltip_after_id: Optional[str] = None
         self._tooltip_message = ""
@@ -147,7 +149,14 @@ class GomokuApp(ctk.CTk):
         self.speed_slider.set(140)
         self.speed_slider.pack(fill="x", padx=14, pady=(0, 6))
         self.speed_value_label = ctk.CTkLabel(self.settings_scroll, text="140 ms between AI moves", text_color="#B8C4D6")
-        self.speed_value_label.pack(padx=14, pady=(0, 14), anchor="w")
+        self.speed_value_label.pack(padx=14, pady=(0, 6), anchor="w")
+        self.no_ui_checkbox = ctk.CTkCheckBox(
+            self.settings_scroll,
+            text="No UI (train faster)",
+            variable=self.no_ui_var,
+            command=self._on_no_ui_toggle,
+        )
+        self.no_ui_checkbox.pack(padx=14, pady=(0, 14), anchor="w")
 
         toolbar = ctk.CTkFrame(self.main, corner_radius=14, fg_color="transparent")
         toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=18, pady=(10, 6))
@@ -291,14 +300,33 @@ class GomokuApp(ctk.CTk):
         self._refresh_turn_label()
         self._refresh_controls()
 
+    def _on_no_ui_toggle(self) -> None:
+        if self.mode_var.get() != "Training":
+            self.no_ui_var.set(False)
+            self.status_var.set("No UI is available only in Training mode.")
+            return
+        if self.no_ui_var.get():
+            self.status_var.set("No UI enabled: rendering reduced for faster training.")
+        else:
+            self.status_var.set("No UI disabled: normal rendering restored.")
+            self._refresh_board()
+            self._refresh_turn_label()
+            self._update_statistics()
+
+    def _is_no_ui_active(self) -> bool:
+        return self.mode_var.get() == "Training" and bool(self.no_ui_var.get())
+
     def _refresh_controls(self) -> None:
         if self.mode_var.get() == "Training":
             self.opponent_menu.configure(state="normal")
             self.human_side_menu.configure(state="disabled")
+            self.no_ui_checkbox.configure(state="normal")
             self.mode_hint.configure(text="Training controls")
         else:
             self.opponent_menu.configure(state="disabled")
             self.human_side_menu.configure(state="normal")
+            self.no_ui_var.set(False)
+            self.no_ui_checkbox.configure(state="disabled")
             self.mode_hint.configure(text="Human vs AI controls")
         self._refresh_start_icon()
 
@@ -332,6 +360,7 @@ class GomokuApp(ctk.CTk):
 
     def _reset_game(self) -> None:
         self.env.reset()
+        self._ui_tick_counter = 0
         self.pending_transitions = {1: None, -1: None}
         self.game_over = False
         self.finish_scheduled = False
@@ -394,7 +423,8 @@ class GomokuApp(ctk.CTk):
             action = self._choose_agent_move(current_player)
 
         self._apply_move(action, current_player, learning_enabled=True)
-        self._refresh_board()
+        if not self._is_no_ui_active():
+            self._refresh_board()
 
         if not self.game_over:
             self._schedule_next_step(int(self.move_delay_var.get()))
@@ -407,7 +437,8 @@ class GomokuApp(ctk.CTk):
         current_player = int(self.env.current_player)
         action = self._choose_agent_move(current_player)
         self._apply_move(action, current_player, learning_enabled=True)
-        self._refresh_board()
+        if not self._is_no_ui_active():
+            self._refresh_board()
 
         if not self.game_over and self.is_running:
             self._schedule_next_step(int(self.move_delay_var.get()))
@@ -485,11 +516,15 @@ class GomokuApp(ctk.CTk):
             self._process_learning(player, transition, result, store_current=store_current)
 
         self.total_moves += 1
+        self._ui_tick_counter += 1
         self.last_move = result.info.get("move") if isinstance(result.info, dict) else None
         self.game_over = bool(result.done)
 
+        no_ui_active = self._is_no_ui_active()
+
         if result.info.get("illegal"):
-            self.status_var.set("Illegal move: -50 and turn skipped.")
+            if not no_ui_active:
+                self.status_var.set("Illegal move: -50 and turn skipped.")
         elif result.info.get("winner"):
             winner = int(result.info["winner"])
             self.status_var.set("Player 1 wins." if winner == 1 else "Player 2 wins.")
@@ -499,12 +534,17 @@ class GomokuApp(ctk.CTk):
             self.status_var.set("Draw: board is full.")
             self.win_line_cells = None
             self.show_win_line = False
-        else:
+        elif not no_ui_active:
             move_name = "X" if self.env.current_player == 1 else "O"
             self.status_var.set(f"Move played. Next turn: {move_name}.")
 
-        self._refresh_turn_label()
-        self._update_statistics()
+        if no_ui_active:
+            if result.done or (self._ui_tick_counter % 20 == 0):
+                self._refresh_turn_label()
+                self._update_statistics()
+        else:
+            self._refresh_turn_label()
+            self._update_statistics()
         if self.mode_var.get() == "Human vs AI" and not self.game_over and self._is_ai_turn():
             self.after(int(self.move_delay_var.get()), self._auto_ai_step)
 
@@ -608,6 +648,7 @@ class GomokuApp(ctk.CTk):
             self.draws += 1
 
         self.total_episodes += 1
+        self._ui_tick_counter = 0
         self._update_statistics()
         self.pending_transitions = {1: None, -1: None}
         self.finish_scheduled = False
