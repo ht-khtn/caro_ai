@@ -7,8 +7,14 @@ from typing import Dict, Optional, Union
 
 import numpy as np
 
-from agent import DQNAgent, QLearningAgent, Transition, create_agent
+from agent import DQNAgent, QLearningAgent, Transition, create_agent, get_torch_device_info
 from environment import GomokuEnv
+
+
+def _agent_backend_info(agent: Union[QLearningAgent, DQNAgent]) -> str:
+    if isinstance(agent, DQNAgent):
+        return agent.backend_info()
+    return "q_learning:cpu"
 
 
 def _apply_training_hyperparams(agent, epsilon_min: float, epsilon_decay: float) -> None:
@@ -89,9 +95,10 @@ def train_headless(
             algo=algorithm,
             opp=opponent,
             ep=episodes,
-            backend=(agent.backend_info() if hasattr(agent, "backend_info") else "cpu"),
+            backend=_agent_backend_info(agent),
         )
     )
+    print("Device: {device}".format(device=get_torch_device_info()))
 
     for episode in range(1, episodes + 1):
         env.reset()

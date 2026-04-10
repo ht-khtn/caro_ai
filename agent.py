@@ -21,6 +21,22 @@ def _try_import_torch() -> Any:
 _TORCH = _try_import_torch()
 TORCH_AVAILABLE = _TORCH is not None
 
+
+def get_torch_device_info() -> str:
+    """Returns PyTorch & GPU availability status."""
+    if not TORCH_AVAILABLE:
+        return "PyTorch: NOT INSTALLED"
+    
+    torch_mod = _TORCH
+    cuda_available = torch_mod.cuda.is_available()
+    if cuda_available:
+        device_name = torch_mod.cuda.get_device_name(0)
+        cuda_version = torch_mod.version.cuda
+        return f"PyTorch: ✓ | GPU: {device_name} (CUDA {cuda_version})"
+    else:
+        return "PyTorch: ✓ | GPU: NOT AVAILABLE (will use CPU)"
+
+
 MAX_BOARD_SIZE = 15
 MAX_ABS_Q = 500.0
 MAX_ABS_ACTIVATION = 1_000.0
