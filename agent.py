@@ -1,13 +1,25 @@
 from __future__ import annotations
 
 import pickle
+import importlib
 from collections import deque
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Deque, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
+
+
+def _try_import_torch() -> Any:
+    try:
+        return importlib.import_module("torch")
+    except Exception:  # pragma: no cover - optional dependency guard
+        return None
+
+
+_TORCH = _try_import_torch()
+TORCH_AVAILABLE = _TORCH is not None
 
 MAX_BOARD_SIZE = 15
 MAX_ABS_Q = 500.0
@@ -530,6 +542,26 @@ def canonical_action(board: np.ndarray, action: int) -> Tuple[bytes, int]:
     return min(encoded, key=lambda item: item[0])
 
 
+def _build_torch_mlp(input_dim: int, hidden_layers: Sequence[int], output_dim: int, torch_mod):
+    nn_mod = torch_mod.nn
+
+    class _TorchMLP(nn_mod.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            sizes = [int(input_dim), *[int(width) for width in hidden_layers], int(output_dim)]
+            self.linears = nn_mod.ModuleList([nn_mod.Linear(left, right) for left, right in zip(sizes[:-1], sizes[1:])])
+
+        def forward(self, x):
+            out = x
+            for index, layer in enumerate(self.linears):
+                out = layer(out)
+                if index < len(self.linears) - 1:
+                    out = torch_mod.relu(out)
+            return out
+
+    return _TorchMLP()
+
+
 class DenseNetwork:
     """A compact NumPy MLP used as a lightweight DQN approximator."""
 
@@ -814,8 +846,25 @@ class DQNAgent:
         self.hidden_layers = tuple(int(layer) for layer in hidden_layers)
         self.memory: Deque[Transition] = deque(maxlen=int(memory_size))
         self.hard_negative_memory: Deque[Transition] = deque(maxlen=max(256, int(memory_size // 3)))
-        self.model = DenseNetwork(self.action_size, self.hidden_layers, self.action_size)
-        self.target_model = self.model.clone()
+        self._torch = _TORCH
+        self.backend = "torch" if TORCH_AVAILABLE else "numpy"
+        self.device = "cpu"
+        if self.backend == "torch":
+            torch_mod = self._torch
+            assert torch_mod is not None
+            self.device = "cuda" if torch_mod.cuda.is_available() else "cpu"
+            self.model_torch = _build_torch_mlp(self.action_size, self.hidden_layers, self.action_size, torch_mod).to(self.device)
+            self.target_model_torch = _build_torch_mlp(self.action_size, self.hidden_layers, self.action_size, torch_mod).to(self.device)
+            self.target_model_torch.load_state_dict(self.model_torch.state_dict())
+            self.optimizer = torch_mod.optim.Adam(self.model_torch.parameters(), lr=self.learning_rate)
+            self.model = None
+            self.target_model = None
+        else:
+            self.model = DenseNetwork(self.action_size, self.hidden_layers, self.action_size)
+            self.target_model = self.model.clone()
+            self.model_torch = None
+            self.target_model_torch = None
+            self.optimizer = None
         self.train_steps = 0
         self.total_updates = 0
 
@@ -825,11 +874,102 @@ class DQNAgent:
     def reset_knowledge(self) -> None:
         self.memory.clear()
         self.hard_negative_memory.clear()
-        self.model = DenseNetwork(self.action_size, self.hidden_layers, self.action_size)
-        self.target_model = self.model.clone()
+        if self.backend == "torch":
+            torch_mod = self._torch
+            assert torch_mod is not None
+            self.model_torch = _build_torch_mlp(self.action_size, self.hidden_layers, self.action_size, torch_mod).to(self.device)
+            self.target_model_torch = _build_torch_mlp(self.action_size, self.hidden_layers, self.action_size, torch_mod).to(self.device)
+            self.target_model_torch.load_state_dict(self.model_torch.state_dict())
+            self.optimizer = torch_mod.optim.Adam(self.model_torch.parameters(), lr=self.learning_rate)
+        else:
+            self.model = DenseNetwork(self.action_size, self.hidden_layers, self.action_size)
+            self.target_model = self.model.clone()
         self.train_steps = 0
         self.total_updates = 0
         self.epsilon = self.initial_epsilon
+
+    def backend_info(self) -> str:
+        return f"{self.backend}:{self.device}" if self.backend == "torch" else "numpy:cpu"
+
+    def _predict_batch(self, states: np.ndarray, use_target: bool = False) -> np.ndarray:
+        states = np.asarray(states, dtype=np.float32)
+        states = np.nan_to_num(states, nan=0.0, posinf=0.0, neginf=0.0)
+        if states.ndim == 1:
+            states = states.reshape(1, -1)
+
+        if self.backend == "torch":
+            torch_mod = self._torch
+            assert torch_mod is not None
+            model = self.target_model_torch if use_target else self.model_torch
+            assert model is not None
+            with torch_mod.no_grad():
+                tensor = torch_mod.from_numpy(states).to(self.device)
+                outputs = model(tensor)
+                outputs = torch_mod.nan_to_num(outputs, nan=0.0, posinf=0.0, neginf=0.0)
+                outputs = torch_mod.clamp(outputs, -MAX_ABS_Q, MAX_ABS_Q)
+            return outputs.detach().cpu().numpy().astype(np.float32)
+
+        assert self.model is not None
+        return self.model.predict(states)
+
+    def _train_batch(self, states: np.ndarray, targets: np.ndarray) -> float:
+        states = np.asarray(states, dtype=np.float32)
+        targets = np.asarray(targets, dtype=np.float32)
+        states = np.nan_to_num(states, nan=0.0, posinf=0.0, neginf=0.0)
+        targets = np.nan_to_num(targets, nan=0.0, posinf=0.0, neginf=0.0)
+        targets = np.clip(targets, -MAX_ABS_Q, MAX_ABS_Q)
+
+        if self.backend == "torch":
+            torch_mod = self._torch
+            assert torch_mod is not None
+            assert self.model_torch is not None
+            assert self.optimizer is not None
+            input_tensor = torch_mod.from_numpy(states).to(self.device)
+            target_tensor = torch_mod.from_numpy(targets).to(self.device)
+            self.optimizer.zero_grad(set_to_none=True)
+            prediction = self.model_torch(input_tensor)
+            prediction = torch_mod.nan_to_num(prediction, nan=0.0, posinf=0.0, neginf=0.0)
+            prediction = torch_mod.clamp(prediction, -MAX_ABS_Q, MAX_ABS_Q)
+            loss = torch_mod.nn.functional.mse_loss(prediction, target_tensor)
+            if not torch_mod.isfinite(loss):
+                return 0.0
+            loss.backward()
+            torch_mod.nn.utils.clip_grad_norm_(self.model_torch.parameters(), max_norm=MAX_ABS_GRADIENT)
+            self.optimizer.step()
+            return float(loss.detach().cpu().item())
+
+        assert self.model is not None
+        return self.model.train_batch(states, targets, self.learning_rate)
+
+    def _sync_target(self) -> None:
+        if self.backend == "torch":
+            assert self.model_torch is not None
+            assert self.target_model_torch is not None
+            self.target_model_torch.load_state_dict(self.model_torch.state_dict())
+        else:
+            assert self.model is not None
+            self.target_model = self.model.clone()
+
+    def _load_numpy_weights_into_torch(
+        self,
+        model_weights: Sequence[np.ndarray],
+        model_biases: Sequence[np.ndarray],
+        target_weights: Sequence[np.ndarray],
+        target_biases: Sequence[np.ndarray],
+    ) -> None:
+        if self.backend != "torch":
+            return
+        torch_mod = self._torch
+        assert torch_mod is not None
+        assert self.model_torch is not None
+        assert self.target_model_torch is not None
+
+        for layer, weight, bias in zip(self.model_torch.linears, model_weights, model_biases):
+            layer.weight.data.copy_(torch_mod.from_numpy(np.asarray(weight, dtype=np.float32).T).to(self.device))
+            layer.bias.data.copy_(torch_mod.from_numpy(np.asarray(bias, dtype=np.float32)).to(self.device))
+        for layer, weight, bias in zip(self.target_model_torch.linears, target_weights, target_biases):
+            layer.weight.data.copy_(torch_mod.from_numpy(np.asarray(weight, dtype=np.float32).T).to(self.device))
+            layer.bias.data.copy_(torch_mod.from_numpy(np.asarray(bias, dtype=np.float32)).to(self.device))
 
     def choose_action(self, state: np.ndarray, legal_moves: Sequence[int], explore: bool = True) -> int:
         legal_moves = list(legal_moves)
@@ -846,7 +986,7 @@ class DQNAgent:
             chosen_canvas = int(np.random.choice(legal_canvas_moves, p=weights))
             return int(_canvas_action_to_board(chosen_canvas, self.board_size, self.canvas_size))
 
-        q_values = np.nan_to_num(self.model.predict(_state_to_vector(state, self.board_size))[0], nan=0.0, posinf=0.0, neginf=0.0)
+        q_values = np.nan_to_num(self._predict_batch(_state_to_vector(state, self.board_size))[0], nan=0.0, posinf=0.0, neginf=0.0)
         q_values = np.clip(q_values, -MAX_ABS_Q, MAX_ABS_Q)
         legal_q = q_values[legal_canvas_moves].astype(np.float32)
         if legal_q.size == 0:
@@ -927,11 +1067,11 @@ class DQNAgent:
             batch.extend(self.memory[index] for index in refill_indices)
         states = np.vstack([item.state.reshape(1, -1) for item in batch])
         next_states = np.vstack([item.next_state.reshape(1, -1) for item in batch])
-        predicted = self.model.predict(states)
+        predicted = self._predict_batch(states, use_target=False)
         predicted = np.nan_to_num(predicted, nan=0.0, posinf=0.0, neginf=0.0)
         predicted = np.clip(predicted, -MAX_ABS_Q, MAX_ABS_Q)
         targets = predicted.copy()
-        next_q_values = self.target_model.predict(next_states)
+        next_q_values = self._predict_batch(next_states, use_target=True)
         next_q_values = np.nan_to_num(next_q_values, nan=0.0, posinf=0.0, neginf=0.0)
         next_q_values = np.clip(next_q_values, -MAX_ABS_Q, MAX_ABS_Q)
 
@@ -947,18 +1087,38 @@ class DQNAgent:
                     target_value = item.reward + self.gamma * float(np.max(next_q_values[row_index, legal_next]))
             targets[row_index, item.action] = _safe_clip_scalar(target_value, MAX_ABS_Q)
 
-        loss = self.model.train_batch(states, targets, self.learning_rate)
+        loss = self._train_batch(states, targets)
         self.train_steps += 1
         self.total_updates += 1
         if self.train_steps % self.target_update_every == 0:
-            self.target_model = self.model.clone()
+            self._sync_target()
 
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
         return loss
 
     def save(self, path: str | Path) -> None:
+        model_weights = None
+        model_biases = None
+        target_weights = None
+        target_biases = None
+        if self.backend == "torch":
+            assert self.model_torch is not None
+            assert self.target_model_torch is not None
+            model_state = {key: value.detach().cpu() for key, value in self.model_torch.state_dict().items()}
+            target_state = {key: value.detach().cpu() for key, value in self.target_model_torch.state_dict().items()}
+        else:
+            assert self.model is not None
+            assert self.target_model is not None
+            model_state = None
+            target_state = None
+            model_weights = [weight.copy() for weight in self.model.weights]
+            model_biases = [bias.copy() for bias in self.model.biases]
+            target_weights = [weight.copy() for weight in self.target_model.weights]
+            target_biases = [bias.copy() for bias in self.target_model.biases]
+
         payload = {
             "type": "dqn",
+            "backend": self.backend,
             "board_size": self.board_size,
             "canvas_size": self.canvas_size,
             "learning_rate": self.learning_rate,
@@ -974,10 +1134,13 @@ class DQNAgent:
             "hard_negative_reward_cutoff": self.hard_negative_reward_cutoff,
             "train_steps": self.train_steps,
             "total_updates": self.total_updates,
-            "model_weights": [weight.copy() for weight in self.model.weights],
-            "model_biases": [bias.copy() for bias in self.model.biases],
-            "target_weights": [weight.copy() for weight in self.target_model.weights],
-            "target_biases": [bias.copy() for bias in self.target_model.biases],
+            "device": self.device,
+            "torch_model_state": model_state,
+            "torch_target_state": target_state,
+            "model_weights": model_weights,
+            "model_biases": model_biases,
+            "target_weights": target_weights,
+            "target_biases": target_biases,
         }
         with open(path, "wb") as handle:
             pickle.dump(payload, handle)
@@ -1004,10 +1167,38 @@ class DQNAgent:
         agent.action_size = agent.canvas_size * agent.canvas_size
         agent.train_steps = payload.get("train_steps", 0)
         agent.total_updates = payload.get("total_updates", 0)
-        agent.model.weights = [weight.copy() for weight in payload["model_weights"]]
-        agent.model.biases = [bias.copy() for bias in payload["model_biases"]]
-        agent.target_model.weights = [weight.copy() for weight in payload["target_weights"]]
-        agent.target_model.biases = [bias.copy() for bias in payload["target_biases"]]
+
+        payload_backend = payload.get("backend", "numpy")
+        if payload_backend == "torch" and agent.backend == "torch":
+            assert agent.model_torch is not None
+            assert agent.target_model_torch is not None
+            state = payload.get("torch_model_state")
+            target_state = payload.get("torch_target_state")
+            if state is not None and target_state is not None:
+                agent.model_torch.load_state_dict(state)
+                agent.target_model_torch.load_state_dict(target_state)
+        elif payload.get("model_weights") is not None:
+            if agent.backend == "torch":
+                agent._load_numpy_weights_into_torch(
+                    payload["model_weights"],
+                    payload["model_biases"],
+                    payload["target_weights"],
+                    payload["target_biases"],
+                )
+            else:
+                assert agent.model is not None
+                assert agent.target_model is not None
+                agent.model.weights = [weight.copy() for weight in payload["model_weights"]]
+                agent.model.biases = [bias.copy() for bias in payload["model_biases"]]
+                agent.target_model.weights = [weight.copy() for weight in payload["target_weights"]]
+                agent.target_model.biases = [bias.copy() for bias in payload["target_biases"]]
+        else:
+            raise ValueError("Unsupported DQN checkpoint format")
+
+        if agent.backend == "torch" and agent.optimizer is not None and agent.model_torch is not None:
+            torch_mod = agent._torch
+            assert torch_mod is not None
+            agent.optimizer = torch_mod.optim.Adam(agent.model_torch.parameters(), lr=agent.learning_rate)
         return agent
 
 

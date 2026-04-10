@@ -84,11 +84,12 @@ def train_headless(
     total_moves = 0
 
     print(
-        "Headless training started | board={board} | algo={algo} | opponent={opp} | episodes={ep}".format(
+        "Headless training started | board={board} | algo={algo} | opponent={opp} | episodes={ep} | backend={backend}".format(
             board=board_size,
             algo=algorithm,
             opp=opponent,
             ep=episodes,
+            backend=(agent.backend_info() if hasattr(agent, "backend_info") else "cpu"),
         )
     )
 

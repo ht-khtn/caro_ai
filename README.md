@@ -32,14 +32,22 @@ pip install -r requirements.txt
 
 ## Chạy chương trình
 
+Headless training (mặc định, tối ưu tốc độ):
+
 ```powershell
-python main.py
+python main.py --episodes 50000 --save-path checkpoints/gomoku.pkl
+```
+
+Mở GUI:
+
+```powershell
+python main.py --with-gui
 ```
 
 ## Ghi chú kỹ thuật
 
 - `QLearningAgent` dùng cho bàn nhỏ.
-- `DQNAgent` dùng mạng MLP thuần NumPy cho bàn lớn.
+- `DQNAgent` dùng backend PyTorch, tự ưu tiên CUDA GPU nếu khả dụng.
 - Augmentation đối xứng 8 hướng được áp dụng để tăng dữ liệu huấn luyện.
 - Khi đổi kích thước bàn cờ, model sẽ được khởi tạo lại vì kích thước state/action thay đổi.
 
