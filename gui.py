@@ -34,7 +34,7 @@ class GomokuApp(ctk.CTk):
         self.board_size_var = ctk.IntVar(value=15)
         self.board_size_display_var = ctk.StringVar(value="15 x 15")
         self.status_var = ctk.StringVar(value="Ready")
-        self.move_delay_var = ctk.DoubleVar(value=350)
+        self.move_delay_var = ctk.DoubleVar(value=140)
         self.stats_var = ctk.StringVar(value="Episodes: 0 | Moves: 0 | Epsilon: 1.00")
         self.score_var = ctk.StringVar(value="P1 Wins: 0 | P2 Wins: 0 | Draws: 0")
         self.turn_var = ctk.StringVar(value="Current turn: X")
@@ -144,9 +144,9 @@ class GomokuApp(ctk.CTk):
 
         self._add_section_label(self.settings_scroll, "Training Speed", "Do tre giua cac nuoc AI. Tang de quan sat, giam de train nhanh.")
         self.speed_slider = ctk.CTkSlider(self.settings_scroll, from_=0, to=2000, number_of_steps=40, command=self._on_speed_change)
-        self.speed_slider.set(350)
+        self.speed_slider.set(140)
         self.speed_slider.pack(fill="x", padx=14, pady=(0, 6))
-        self.speed_value_label = ctk.CTkLabel(self.settings_scroll, text="350 ms between AI moves", text_color="#B8C4D6")
+        self.speed_value_label = ctk.CTkLabel(self.settings_scroll, text="140 ms between AI moves", text_color="#B8C4D6")
         self.speed_value_label.pack(padx=14, pady=(0, 14), anchor="w")
 
         toolbar = ctk.CTkFrame(self.main, corner_radius=14, fg_color="transparent")
@@ -211,6 +211,15 @@ class GomokuApp(ctk.CTk):
         train_level.pack(padx=14, pady=(0, 6), anchor="w")
         center_focus = ctk.CTkLabel(self.right_panel, textvariable=self.center_focus_var, text_color="#86D3FF", wraplength=220, justify="left")
         center_focus.pack(padx=14, pady=(0, 12), anchor="w")
+
+        self.reset_ai_button = ctk.CTkButton(
+            self.right_panel,
+            text="Reset AI Knowledge",
+            fg_color="#7A1F1F",
+            hover_color="#932A2A",
+            command=self._reset_ai_knowledge,
+        )
+        self.reset_ai_button.pack(fill="x", padx=14, pady=(6, 12))
 
         footer = ctk.CTkLabel(
             self.main,
@@ -334,6 +343,34 @@ class GomokuApp(ctk.CTk):
         self._refresh_board()
         if self.mode_var.get() == "Human vs AI" and self._is_ai_turn():
             self.after(250, self._auto_ai_step)
+
+    def _reset_ai_knowledge(self) -> None:
+        answer = messagebox.askyesno(
+            "Reset AI",
+            "Reset toàn bộ tri thức AI hiện tại?\nHành động này sẽ xóa kiến thức đã học trong bộ nhớ.",
+        )
+        if not answer:
+            return
+
+        self.is_running = False
+        self._refresh_start_icon()
+        self.pending_transitions = {1: None, -1: None}
+        self.center_opening_hits = 0
+        self.center_opening_samples = 0
+
+        if hasattr(self.agent, "reset_knowledge"):
+            self.agent.reset_knowledge()
+        else:
+            if isinstance(self.agent, QLearningAgent):
+                self.agent = create_agent(self.env.board_size, algorithm="q_learning")
+            else:
+                self.agent = create_agent(self.env.board_size, algorithm="dqn")
+
+        if hasattr(self.agent, "set_board_size"):
+            self.agent.set_board_size(self.env.board_size)
+
+        self.status_var.set("AI knowledge reset complete.")
+        self._update_statistics()
 
     def _schedule_next_step(self, delay_ms: int) -> None:
         self.after(max(1, delay_ms), self._training_or_play_step)

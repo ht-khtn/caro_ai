@@ -9,6 +9,10 @@ from typing import Deque, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 
 MAX_BOARD_SIZE = 15
+MAX_ABS_Q = 500.0
+MAX_ABS_ACTIVATION = 1_000.0
+MAX_ABS_GRADIENT = 5.0
+MAX_ABS_WEIGHT = 12.0
 
 
 @dataclass
@@ -23,6 +27,12 @@ class Transition:
 
 def _state_to_vector(state: np.ndarray, board_size: int) -> np.ndarray:
     return _embed_board(state, board_size).astype(np.float32).reshape(1, -1)
+
+
+def _safe_clip_scalar(value: float, limit: float) -> float:
+    if not np.isfinite(value):
+        return 0.0
+    return float(np.clip(value, -limit, limit))
 
 
 def _board_offset(board_size: int, canvas_size: int = MAX_BOARD_SIZE) -> int:
@@ -226,18 +236,25 @@ class DenseNetwork:
 
     def predict(self, x: np.ndarray) -> np.ndarray:
         x = np.asarray(x, dtype=np.float32)
+        x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         if x.ndim == 1:
             x = x.reshape(1, -1)
         activations = x
         for layer_index, (weight, bias) in enumerate(zip(self.weights, self.biases)):
             activations = activations @ weight + bias
+            activations = np.nan_to_num(activations, nan=0.0, posinf=0.0, neginf=0.0)
+            activations = np.clip(activations, -MAX_ABS_ACTIVATION, MAX_ABS_ACTIVATION)
             if layer_index < len(self.weights) - 1:
                 activations = np.maximum(activations, 0.0)
+                activations = np.clip(activations, 0.0, MAX_ABS_ACTIVATION)
         return activations
 
     def train_batch(self, x: np.ndarray, target: np.ndarray, learning_rate: float) -> float:
         x = np.asarray(x, dtype=np.float32)
         target = np.asarray(target, dtype=np.float32)
+        x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        target = np.nan_to_num(target, nan=0.0, posinf=0.0, neginf=0.0)
+        target = np.clip(target, -MAX_ABS_Q, MAX_ABS_Q)
         if x.ndim == 1:
             x = x.reshape(1, -1)
         if target.ndim == 1:
@@ -248,16 +265,26 @@ class DenseNetwork:
         current = x
         for layer_index, (weight, bias) in enumerate(zip(self.weights, self.biases)):
             current = current @ weight + bias
+            current = np.nan_to_num(current, nan=0.0, posinf=0.0, neginf=0.0)
+            current = np.clip(current, -MAX_ABS_ACTIVATION, MAX_ABS_ACTIVATION)
             pre_activations.append(current)
             if layer_index < len(self.weights) - 1:
                 current = np.maximum(current, 0.0)
+                current = np.clip(current, 0.0, MAX_ABS_ACTIVATION)
             activations.append(current)
 
         prediction = activations[-1]
+        prediction = np.nan_to_num(prediction, nan=0.0, posinf=0.0, neginf=0.0)
         error = prediction - target
+        error = np.nan_to_num(error, nan=0.0, posinf=0.0, neginf=0.0)
+        error = np.clip(error, -MAX_ABS_Q, MAX_ABS_Q)
         loss = float(np.mean(error * error))
+        if not np.isfinite(loss):
+            return 0.0
 
         gradient = (2.0 / x.shape[0]) * error
+        gradient = np.nan_to_num(gradient, nan=0.0, posinf=0.0, neginf=0.0)
+        gradient = np.clip(gradient, -MAX_ABS_GRADIENT, MAX_ABS_GRADIENT)
         weights_snapshot = [weight.copy() for weight in self.weights]
         grad_weights: List[np.ndarray] = [np.zeros_like(weight) for weight in self.weights]
         grad_biases: List[np.ndarray] = [np.zeros_like(bias) for bias in self.biases]
@@ -266,14 +293,24 @@ class DenseNetwork:
             activation_prev = activations[layer_index]
             grad_weights[layer_index] = activation_prev.T @ gradient
             grad_biases[layer_index] = gradient.sum(axis=0)
+            grad_weights[layer_index] = np.nan_to_num(grad_weights[layer_index], nan=0.0, posinf=0.0, neginf=0.0)
+            grad_biases[layer_index] = np.nan_to_num(grad_biases[layer_index], nan=0.0, posinf=0.0, neginf=0.0)
+            grad_weights[layer_index] = np.clip(grad_weights[layer_index], -MAX_ABS_GRADIENT, MAX_ABS_GRADIENT)
+            grad_biases[layer_index] = np.clip(grad_biases[layer_index], -MAX_ABS_GRADIENT, MAX_ABS_GRADIENT)
 
             if layer_index > 0:
                 gradient = gradient @ weights_snapshot[layer_index].T
                 gradient = gradient * (pre_activations[layer_index - 1] > 0.0)
+                gradient = np.nan_to_num(gradient, nan=0.0, posinf=0.0, neginf=0.0)
+                gradient = np.clip(gradient, -MAX_ABS_GRADIENT, MAX_ABS_GRADIENT)
 
         for layer_index in range(len(self.weights)):
             self.weights[layer_index] -= learning_rate * grad_weights[layer_index]
             self.biases[layer_index] -= learning_rate * grad_biases[layer_index]
+            self.weights[layer_index] = np.nan_to_num(self.weights[layer_index], nan=0.0, posinf=0.0, neginf=0.0)
+            self.biases[layer_index] = np.nan_to_num(self.biases[layer_index], nan=0.0, posinf=0.0, neginf=0.0)
+            self.weights[layer_index] = np.clip(self.weights[layer_index], -MAX_ABS_WEIGHT, MAX_ABS_WEIGHT)
+            self.biases[layer_index] = np.clip(self.biases[layer_index], -MAX_ABS_WEIGHT, MAX_ABS_WEIGHT)
 
         return loss
 
@@ -282,11 +319,11 @@ class QLearningAgent:
     def __init__(
         self,
         board_size: int,
-        learning_rate: float = 0.1,
+        learning_rate: float = 0.14,
         gamma: float = 0.9,
         epsilon: float = 1.0,
-        epsilon_min: float = 0.05,
-        epsilon_decay: float = 0.995,
+        epsilon_min: float = 0.02,
+        epsilon_decay: float = 0.992,
     ) -> None:
         self.canvas_size = MAX_BOARD_SIZE
         self.board_size = int(board_size)
@@ -294,6 +331,7 @@ class QLearningAgent:
         self.learning_rate = float(learning_rate)
         self.gamma = float(gamma)
         self.epsilon = float(epsilon)
+        self.initial_epsilon = float(epsilon)
         self.epsilon_min = float(epsilon_min)
         self.epsilon_decay = float(epsilon_decay)
         self.q_table: Dict[bytes, np.ndarray] = {}
@@ -301,6 +339,11 @@ class QLearningAgent:
 
     def set_board_size(self, board_size: int) -> None:
         self.board_size = int(board_size)
+
+    def reset_knowledge(self) -> None:
+        self.q_table.clear()
+        self.total_updates = 0
+        self.epsilon = self.initial_epsilon
 
     def _get_q_values(self, state: np.ndarray) -> np.ndarray:
         key = _embed_board(state, self.board_size, self.canvas_size).astype(np.int8).tobytes()
@@ -327,7 +370,7 @@ class QLearningAgent:
         candidates = [move for move, value in zip(legal_canvas_moves, legal_q) if np.isfinite(value) and abs(float(value) - max_q) < 1e-6]
         if not candidates:
             heuristic = _heuristic_move_bonus(state, self.board_size, legal_moves, last_move=None)
-            blended = legal_q + 0.15 * heuristic
+            blended = legal_q + 0.25 * heuristic
             best_index = int(np.argmax(blended))
             return int(_canvas_action_to_board(legal_canvas_moves[best_index], self.board_size, self.canvas_size))
         if len(candidates) == 1:
@@ -363,7 +406,8 @@ class QLearningAgent:
                     target_value = transition.reward + self.gamma * float(np.max(next_q_values[legal_next]))
 
             prediction = float(q_values[action_canvas])
-            q_values[action_canvas] = prediction + self.learning_rate * (target_value - prediction)
+            updated_q = prediction + self.learning_rate * (target_value - prediction)
+            q_values[action_canvas] = _safe_clip_scalar(updated_q, MAX_ABS_Q)
             total_loss += abs(target_value - prediction)
 
         self.total_updates += 1
@@ -409,15 +453,16 @@ class DQNAgent:
     def __init__(
         self,
         board_size: int,
-        learning_rate: float = 0.1,
+        learning_rate: float = 0.08,
         gamma: float = 0.9,
         epsilon: float = 1.0,
-        epsilon_min: float = 0.05,
-        epsilon_decay: float = 0.998,
+        epsilon_min: float = 0.02,
+        epsilon_decay: float = 0.996,
         memory_size: int = 50_000,
-        batch_size: int = 64,
+        batch_size: int = 48,
         hidden_layers: Sequence[int] = (256, 128),
-        target_update_every: int = 250,
+        target_update_every: int = 120,
+        replay_loops: int = 2,
     ) -> None:
         self.canvas_size = MAX_BOARD_SIZE
         self.board_size = int(board_size)
@@ -425,10 +470,12 @@ class DQNAgent:
         self.learning_rate = float(learning_rate)
         self.gamma = float(gamma)
         self.epsilon = float(epsilon)
+        self.initial_epsilon = float(epsilon)
         self.epsilon_min = float(epsilon_min)
         self.epsilon_decay = float(epsilon_decay)
         self.batch_size = int(batch_size)
         self.target_update_every = int(target_update_every)
+        self.replay_loops = int(max(1, replay_loops))
         self.hidden_layers = tuple(int(layer) for layer in hidden_layers)
         self.memory: Deque[Transition] = deque(maxlen=int(memory_size))
         self.model = DenseNetwork(self.action_size, self.hidden_layers, self.action_size)
@@ -438,6 +485,14 @@ class DQNAgent:
 
     def set_board_size(self, board_size: int) -> None:
         self.board_size = int(board_size)
+
+    def reset_knowledge(self) -> None:
+        self.memory.clear()
+        self.model = DenseNetwork(self.action_size, self.hidden_layers, self.action_size)
+        self.target_model = self.model.clone()
+        self.train_steps = 0
+        self.total_updates = 0
+        self.epsilon = self.initial_epsilon
 
     def choose_action(self, state: np.ndarray, legal_moves: Sequence[int], explore: bool = True) -> int:
         legal_moves = list(legal_moves)
@@ -450,6 +505,7 @@ class DQNAgent:
             return int(_canvas_action_to_board(chosen_canvas, self.board_size, self.canvas_size))
 
         q_values = np.nan_to_num(self.model.predict(_state_to_vector(state, self.board_size))[0], nan=0.0, posinf=0.0, neginf=0.0)
+        q_values = np.clip(q_values, -MAX_ABS_Q, MAX_ABS_Q)
         legal_q = q_values[legal_canvas_moves].astype(np.float32)
         if legal_q.size == 0:
             return int(np.random.choice(legal_moves))
@@ -458,7 +514,7 @@ class DQNAgent:
         candidates = [move for move, value in zip(legal_canvas_moves, legal_q) if np.isfinite(value) and abs(float(value) - max_q) < 1e-6]
         if not candidates:
             heuristic = _heuristic_move_bonus(state, self.board_size, legal_moves, last_move=None)
-            blended = legal_q + 0.15 * heuristic
+            blended = legal_q + 0.25 * heuristic
             best_index = int(np.argmax(blended))
             return int(_canvas_action_to_board(legal_canvas_moves[best_index], self.board_size, self.canvas_size))
         if len(candidates) == 1:
@@ -490,7 +546,10 @@ class DQNAgent:
 
     def learn_from_transition(self, transition: Transition) -> float:
         self.remember(transition)
-        return self.replay()
+        total = 0.0
+        for _ in range(self.replay_loops):
+            total += self.replay()
+        return total / float(self.replay_loops)
 
     def replay(self) -> float:
         if len(self.memory) < self.batch_size:
@@ -501,8 +560,12 @@ class DQNAgent:
         states = np.vstack([item.state.reshape(1, -1) for item in batch])
         next_states = np.vstack([item.next_state.reshape(1, -1) for item in batch])
         predicted = self.model.predict(states)
+        predicted = np.nan_to_num(predicted, nan=0.0, posinf=0.0, neginf=0.0)
+        predicted = np.clip(predicted, -MAX_ABS_Q, MAX_ABS_Q)
         targets = predicted.copy()
         next_q_values = self.target_model.predict(next_states)
+        next_q_values = np.nan_to_num(next_q_values, nan=0.0, posinf=0.0, neginf=0.0)
+        next_q_values = np.clip(next_q_values, -MAX_ABS_Q, MAX_ABS_Q)
 
         for row_index, item in enumerate(batch):
             board_region = _legal_canvas_mask(int(item.board_size or self.board_size), self.canvas_size)
@@ -514,7 +577,7 @@ class DQNAgent:
                     target_value = item.reward
                 else:
                     target_value = item.reward + self.gamma * float(np.max(next_q_values[row_index, legal_next]))
-            targets[row_index, item.action] = target_value
+            targets[row_index, item.action] = _safe_clip_scalar(target_value, MAX_ABS_Q)
 
         loss = self.model.train_batch(states, targets, self.learning_rate)
         self.train_steps += 1
@@ -538,6 +601,7 @@ class DQNAgent:
             "batch_size": self.batch_size,
             "hidden_layers": self.hidden_layers,
             "target_update_every": self.target_update_every,
+            "replay_loops": self.replay_loops,
             "train_steps": self.train_steps,
             "total_updates": self.total_updates,
             "model_weights": [weight.copy() for weight in self.model.weights],
@@ -562,6 +626,7 @@ class DQNAgent:
             batch_size=payload["batch_size"],
             hidden_layers=payload["hidden_layers"],
             target_update_every=payload["target_update_every"],
+            replay_loops=payload.get("replay_loops", 2),
         )
         agent.canvas_size = payload.get("canvas_size", MAX_BOARD_SIZE)
         agent.action_size = agent.canvas_size * agent.canvas_size
@@ -577,14 +642,16 @@ class DQNAgent:
 def create_agent(
     board_size: int,
     algorithm: str = "auto",
-    learning_rate: float = 0.1,
+    learning_rate: Optional[float] = None,
     gamma: float = 0.9,
 ) -> object:
     algorithm = algorithm.lower().strip()
     if algorithm == "auto":
         algorithm = "q_learning" if board_size <= 5 else "dqn"
     if algorithm in {"q", "q_learning", "q-learning"}:
-        return QLearningAgent(board_size=board_size, learning_rate=learning_rate, gamma=gamma)
+        lr = 0.14 if learning_rate is None else float(learning_rate)
+        return QLearningAgent(board_size=board_size, learning_rate=lr, gamma=gamma)
     if algorithm == "dqn":
-        return DQNAgent(board_size=board_size, learning_rate=learning_rate, gamma=gamma)
+        lr = 0.08 if learning_rate is None else float(learning_rate)
+        return DQNAgent(board_size=board_size, learning_rate=lr, gamma=gamma)
     raise ValueError(f"Unknown algorithm: {algorithm}")
