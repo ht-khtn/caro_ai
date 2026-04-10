@@ -1016,7 +1016,7 @@ def create_agent(
     algorithm: str = "auto",
     learning_rate: Optional[float] = None,
     gamma: float = 0.9,
-) -> object:
+) -> "QLearningAgent | DQNAgent":
     algorithm = algorithm.lower().strip()
     if algorithm == "auto":
         algorithm = "q_learning" if board_size <= 5 else "dqn"
