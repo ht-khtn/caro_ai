@@ -141,6 +141,14 @@ class GomokuEnv:
         own_after = self._count_threats(board_after, player)
         opp_before = self._count_threats(board_before, -player)
         opp_after = self._count_threats(board_after, -player)
+        own_open_before = self._count_open_threats(board_before, player)
+        own_open_after = self._count_open_threats(board_after, player)
+        opp_open_before = self._count_open_threats(board_before, -player)
+        opp_open_after = self._count_open_threats(board_after, -player)
+        own_fork_before = self._count_forks(board_before, player)
+        own_fork_after = self._count_forks(board_after, player)
+        opp_fork_before = self._count_forks(board_before, -player)
+        opp_fork_after = self._count_forks(board_after, -player)
 
         reward = -0.2
         reward += 25.0 * max(0, own_after[4] - own_before[4])
@@ -152,7 +160,85 @@ class GomokuEnv:
         # Penalize moves that increase opponent threats.
         reward -= 45.0 * max(0, opp_after[4] - opp_before[4])
         reward -= 18.0 * max(0, opp_after[3] - opp_before[3])
+
+        # Open-ended threats (two-ended patterns) are much more tactical.
+        reward += 38.0 * max(0, own_open_after[4] - own_open_before[4])
+        reward += 18.0 * max(0, own_open_after[3] - own_open_before[3])
+        reward += 58.0 * max(0, opp_open_before[4] - opp_open_after[4])
+        reward += 26.0 * max(0, opp_open_before[3] - opp_open_after[3])
+
+        # Strong defense rule: if opponent had open-4/open-3 and move did not reduce it, penalize.
+        if opp_open_before[4] > 0 and opp_open_after[4] >= opp_open_before[4]:
+            reward -= 75.0 * opp_open_before[4]
+        if opp_open_before[3] > 0 and opp_open_after[3] >= opp_open_before[3]:
+            reward -= 24.0 * opp_open_before[3]
+
+        # Fork/double-threat shaping: creating multiple live threats is strategically valuable.
+        reward += 22.0 * max(0, own_fork_after - own_fork_before)
+        reward -= 28.0 * max(0, opp_fork_after - opp_fork_before)
+        reward += 18.0 * max(0, opp_fork_before - opp_fork_after)
         return float(reward)
+
+    def _count_open_threats(self, board: np.ndarray, player: int) -> Dict[int, int]:
+        counts = {3: 0, 4: 0}
+        for stones in (3, 4):
+            if stones >= self.win_length:
+                continue
+            counts[stones] = self._count_open_sequences(board, player, stones)
+        return counts
+
+    def _count_forks(self, board: np.ndarray, player: int) -> int:
+        open_threats = self._count_open_threats(board, player)
+        # A simple and effective fork proxy: two or more live open-3/open-4 lines at once.
+        live = open_threats[3] + open_threats[4]
+        return max(0, live - 1)
+
+    def _count_open_sequences(self, board: np.ndarray, player: int, stones: int) -> int:
+        total = 0
+        segment_len = stones + 2
+        for line in self._iter_lines(board):
+            line_len = len(line)
+            if line_len < segment_len:
+                continue
+            for start in range(line_len - segment_len + 1):
+                segment = line[start : start + segment_len]
+                if segment[0] != 0 or segment[-1] != 0:
+                    continue
+                middle = segment[1:-1]
+                if not all(value == player for value in middle):
+                    continue
+
+                # Avoid counting extended sequences as short patterns.
+                left_extended = start > 0 and line[start - 1] == player
+                right_extended = (start + segment_len) < line_len and line[start + segment_len] == player
+                if left_extended or right_extended:
+                    continue
+                total += 1
+        return total
+
+    def _iter_lines(self, board: np.ndarray) -> List[List[int]]:
+        lines: List[List[int]] = []
+        size = self.board_size
+
+        for row in range(size):
+            lines.append(board[row, :].astype(int).tolist())
+        for col in range(size):
+            lines.append(board[:, col].astype(int).tolist())
+
+        # Main diagonals.
+        for offset in range(-(size - 1), size):
+            diag = np.diagonal(board, offset=offset)
+            if diag.size >= 3:
+                lines.append(diag.astype(int).tolist())
+
+        # Anti-diagonals.
+        flipped = np.fliplr(board)
+        for offset in range(-(size - 1), size):
+            diag = np.diagonal(flipped, offset=offset)
+            if diag.size >= 3:
+                lines.append(diag.astype(int).tolist())
+
+        return lines
 
     def _positional_reward(self, board_before: np.ndarray, row: int, col: int, player: int) -> float:
         occupied = np.argwhere(board_before != 0)
