@@ -727,15 +727,6 @@ class MinimaxAgent:
         if not legal:
             return 0
 
-        win_length = min(5, self.board_size)
-        immediate_win = _find_immediate_wins(state, legal, self.board_size, player=1, win_length=win_length)
-        if immediate_win:
-            return _pick_weighted_move(state, self.board_size, immediate_win)
-
-        immediate_block = _find_immediate_wins(state, legal, self.board_size, player=-1, win_length=win_length)
-        if immediate_block:
-            return _pick_weighted_move(state, self.board_size, immediate_block)
-
         candidates = self._rank_candidates(state, legal, player=1)
         if not candidates:
             return _pick_weighted_move(state, self.board_size, legal)
@@ -803,22 +794,13 @@ class MinimaxAgent:
         frontier = _frontier_moves(board, legal_moves, self.board_size, radius=2)
         if not frontier:
             return [int(move) for move in legal_moves][: self.max_branching]
-
-        win_length = min(5, self.board_size)
-        own_wins = set(_find_immediate_wins(board, frontier, self.board_size, player=player, win_length=win_length))
-        opp_wins = set(_find_immediate_wins(board, frontier, self.board_size, player=-player, win_length=win_length))
-        weights = _heuristic_move_bonus(board, self.board_size, frontier, last_move=None)
-        weighted = {int(move): float(weight) for move, weight in zip(frontier, weights)}
-
         scored: List[Tuple[float, int]] = []
         for move in frontier:
-            score = 0.0
-            if int(move) in own_wins:
-                score += 100_000.0
-            if int(move) in opp_wins:
-                score += 90_000.0
-            score += 200.0 * weighted.get(int(move), 0.0)
-            scored.append((score, int(move)))
+            row, col = divmod(int(move), self.board_size)
+            board[row, col] = int(player)
+            score = self._quick_move_score(board, row, col, int(player))
+            board[row, col] = 0
+            scored.append((float(score), int(move)))
 
         scored.sort(key=lambda item: item[0], reverse=True)
         return [move for _, move in scored[: self.max_branching]]
@@ -834,43 +816,82 @@ class MinimaxAgent:
         return None
 
     def _evaluate_board(self, board: np.ndarray) -> float:
-        legal = np.flatnonzero(board.reshape(-1) == 0).astype(np.int32).tolist()
-        if not legal:
+        own = self._pattern_score(board, player=1)
+        opp = self._pattern_score(board, player=-1)
+        center = self._center_control(board)
+        return own - 1.08 * opp + center
+
+    def _quick_move_score(self, board: np.ndarray, row: int, col: int, player: int) -> float:
+        # Local ordering score for alpha-beta move ordering.
+        win_length = min(5, self.board_size)
+        if self._has_win(board, player=player, win_length=win_length):
+            return 1_000_000.0
+        directions = ((1, 0), (0, 1), (1, 1), (1, -1))
+        score = 0.0
+        for dr, dc in directions:
+            length, open_ends = _line_length_open_ends(board, row, col, dr, dc, player)
+            score += self._run_weight(length, open_ends)
+        return score
+
+    def _pattern_score(self, board: np.ndarray, player: int) -> float:
+        size = self.board_size
+        score = 0.0
+        directions = ((1, 0), (0, 1), (1, 1), (1, -1))
+
+        for row in range(size):
+            for col in range(size):
+                if int(board[row, col]) != int(player):
+                    continue
+                for dr, dc in directions:
+                    prev_r = row - dr
+                    prev_c = col - dc
+                    if 0 <= prev_r < size and 0 <= prev_c < size and int(board[prev_r, prev_c]) == int(player):
+                        continue
+
+                    run = 1
+                    r = row + dr
+                    c = col + dc
+                    while 0 <= r < size and 0 <= c < size and int(board[r, c]) == int(player):
+                        run += 1
+                        r += dr
+                        c += dc
+
+                    open_ends = 0
+                    if 0 <= prev_r < size and 0 <= prev_c < size and int(board[prev_r, prev_c]) == 0:
+                        open_ends += 1
+                    if 0 <= r < size and 0 <= c < size and int(board[r, c]) == 0:
+                        open_ends += 1
+
+                    score += self._run_weight(run, open_ends)
+        return score
+
+    def _run_weight(self, run: int, open_ends: int) -> float:
+        win_length = min(5, self.board_size)
+        if run >= win_length:
+            return 200_000.0
+        if run <= 1:
             return 0.0
 
-        win_length = min(5, self.board_size)
-        own_wins = len(_find_immediate_wins(board, legal, self.board_size, player=1, win_length=win_length))
-        opp_wins = len(_find_immediate_wins(board, legal, self.board_size, player=-1, win_length=win_length))
-        own_open_three = len(_find_open_three_end_blocks(board, legal, self.board_size, player=1))
-        opp_open_three = len(_find_open_three_end_blocks(board, legal, self.board_size, player=-1))
+        if run == win_length - 1:
+            return 7_500.0 if open_ends == 2 else 2_500.0 if open_ends == 1 else 0.0
+        if run == win_length - 2:
+            return 900.0 if open_ends == 2 else 260.0 if open_ends == 1 else 0.0
+        if run == win_length - 3:
+            return 140.0 if open_ends == 2 else 35.0 if open_ends == 1 else 0.0
+        return 25.0 if open_ends == 2 else 8.0 if open_ends == 1 else 0.0
 
-        own_best_len, own_best_open = self._best_line_features(board, player=1)
-        opp_best_len, opp_best_open = self._best_line_features(board, player=-1)
-        stone_balance = float(np.count_nonzero(board == 1) - np.count_nonzero(board == -1))
-
-        return (
-            45_000.0 * float(own_wins)
-            - 52_000.0 * float(opp_wins)
-            + 900.0 * float(own_open_three)
-            - 1_200.0 * float(opp_open_three)
-            + 850.0 * float(own_best_len)
-            - 1_050.0 * float(opp_best_len)
-            + 180.0 * float(own_best_open)
-            - 220.0 * float(opp_best_open)
-            + 8.0 * stone_balance
-        )
-
-    def _best_line_features(self, board: np.ndarray, player: int) -> Tuple[int, int]:
-        best_len = 0
-        best_open = 0
-        occupied = np.argwhere(board == int(player))
-        for row, col in occupied:
-            move = int(row) * self.board_size + int(col)
-            length, open_ends = _max_line_after_move(board, move, self.board_size, int(player))
-            if length > best_len or (length == best_len and open_ends > best_open):
-                best_len = int(length)
-                best_open = int(open_ends)
-        return best_len, best_open
+    def _center_control(self, board: np.ndarray) -> float:
+        center = (self.board_size - 1) / 2.0
+        total = 0.0
+        for row in range(self.board_size):
+            for col in range(self.board_size):
+                cell = int(board[row, col])
+                if cell == 0:
+                    continue
+                distance = np.sqrt((row - center) ** 2 + (col - center) ** 2)
+                weight = 1.0 / (1.0 + distance)
+                total += float(cell) * float(weight) * 22.0
+        return total
 
     def _has_win(self, board: np.ndarray, player: int, win_length: int) -> bool:
         directions = ((1, 0), (0, 1), (1, 1), (1, -1))

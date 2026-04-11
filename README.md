@@ -32,6 +32,8 @@ python main.py
 ## Ghi chú kỹ thuật
 
 - Engine đã khóa sang `MinimaxAgent` + Alpha-Beta.
+- Heuristic evaluation mới dùng pattern scoring (do dai day + so dau mo + center control).
+- Khong dung tactical override theo kieu cu (block/open-three rule hardcode) trong duong Minimax.
 - UI đã khóa chế độ thuật toán để tránh lệch backend.
 - Khi người chơi click ô đã có quân, nước đi bị chặn ngay ở UI.
 - Khi đổi kích thước bàn cờ, model sẽ được khởi tạo lại vì kích thước state/action thay đổi.
