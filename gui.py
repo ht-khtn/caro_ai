@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import os
 import pickle
-from typing import Dict, Optional
+from typing import Optional
 
 import customtkinter as ctk
 import numpy as np
 from tkinter import Canvas, Label, Toplevel, filedialog, messagebox
 
-from agent import DQNAgent, MinimaxAgent, QLearningAgent, Transition, create_agent
+from agent import MinimaxAgent, create_agent
 from environment import GomokuEnv
 
 
@@ -19,17 +19,15 @@ class GomokuApp(ctk.CTk):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
 
-        self.title("Gomoku RL Trainer")
+        self.title("Gomoku Minimax Trainer")
         self.geometry("1320x860")
         self.minsize(1200, 780)
 
         self.env = GomokuEnv(board_size=15)
         self.agent = create_agent(board_size=15, algorithm="auto")
-        self.pending_transitions: Dict[int, Optional[Transition]] = {1: None, -1: None}
-
         self.mode_var = ctk.StringVar(value="Training")
         self.training_opponent_var = ctk.StringVar(value="Self-Play")
-        self.algorithm_var = ctk.StringVar(value="Auto")
+        self.algorithm_var = ctk.StringVar(value="Minimax (Alpha-Beta)")
         self.human_side_var = ctk.StringVar(value="First")
         self.board_size_var = ctk.IntVar(value=15)
         self.board_size_display_var = ctk.StringVar(value="15 x 15")
@@ -91,7 +89,7 @@ class GomokuApp(ctk.CTk):
         self.main.grid_rowconfigure(0, weight=0)
         self.main.grid_rowconfigure(1, weight=1)
 
-        title = ctk.CTkLabel(self.sidebar, text="Gomoku RL Trainer", font=ctk.CTkFont(size=26, weight="bold"))
+        title = ctk.CTkLabel(self.sidebar, text="Gomoku Minimax Trainer", font=ctk.CTkFont(size=26, weight="bold"))
         title.grid(row=0, column=0, padx=18, pady=(18, 8), sticky="w")
 
         self.settings_scroll = ctk.CTkScrollableFrame(
@@ -105,7 +103,7 @@ class GomokuApp(ctk.CTk):
 
         subtitle = ctk.CTkLabel(
             self.settings_scroll,
-            text="Self-play, human vs AI, curriculum board sizes, and live learning.",
+            text="Self-play, human vs AI, curriculum board sizes, and Minimax engine.",
             wraplength=280,
             justify="left",
             text_color="#B8C4D6",
@@ -131,9 +129,10 @@ class GomokuApp(ctk.CTk):
         )
         self.human_side_menu.pack(fill="x", padx=14, pady=(0, 14))
 
-        self._add_section_label(self.settings_scroll, "Algorithm", "Auto mac dinh dung Minimax + Alpha-Beta. Van co the chon Q-Learning hoac DQN.")
-        self.algorithm_menu = ctk.CTkOptionMenu(self.settings_scroll, values=["Auto", "Minimax", "Q-Learning", "DQN"], variable=self.algorithm_var)
+        self._add_section_label(self.settings_scroll, "Algorithm", "He thong da khoa sang Minimax + Alpha-Beta de tranh sai lech giua cac backend.")
+        self.algorithm_menu = ctk.CTkOptionMenu(self.settings_scroll, values=["Minimax (Alpha-Beta)"], variable=self.algorithm_var)
         self.algorithm_menu.pack(fill="x", padx=14, pady=(0, 14))
+        self.algorithm_menu.configure(state="disabled")
 
         self._add_section_label(self.settings_scroll, "Curriculum Board Size", "Bat dau ban nho de hoc khai niem, sau do tang dan toi 15x15.")
         self.board_slider = ctk.CTkSlider(self.settings_scroll, from_=3, to=15, number_of_steps=12, command=self._on_board_slider)
@@ -214,7 +213,7 @@ class GomokuApp(ctk.CTk):
         ctk.CTkLabel(o_box, text="O", text_color="#3498DB", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="center")
         ctk.CTkLabel(o_box, textvariable=self.o_score_var, text_color="#3498DB", font=ctk.CTkFont(size=30, weight="bold")).pack(anchor="center")
 
-        train_title = ctk.CTkLabel(self.right_panel, text="AI Training", font=ctk.CTkFont(size=20, weight="bold"))
+        train_title = ctk.CTkLabel(self.right_panel, text="AI Strength", font=ctk.CTkFont(size=20, weight="bold"))
         train_title.pack(padx=14, pady=(6, 10), anchor="w")
         train_level = ctk.CTkLabel(self.right_panel, textvariable=self.ai_level_var, text_color="#A2F59C", font=ctk.CTkFont(size=16, weight="bold"))
         train_level.pack(padx=14, pady=(0, 6), anchor="w")
@@ -223,7 +222,7 @@ class GomokuApp(ctk.CTk):
 
         self.reset_ai_button = ctk.CTkButton(
             self.right_panel,
-            text="Reset AI Knowledge",
+            text="Reset AI State",
             fg_color="#7A1F1F",
             hover_color="#932A2A",
             command=self._reset_ai_knowledge,
@@ -333,43 +332,11 @@ class GomokuApp(ctk.CTk):
     def _refresh_start_icon(self) -> None:
         self.start_button.configure(text="⏸" if self.is_running else "▶")
 
-    def _selected_algorithm_key(self) -> str:
-        selected = self.algorithm_var.get().strip().lower()
-        if selected in {"q-learning", "q_learning", "q"}:
-            return "q_learning"
-        if selected == "dqn":
-            return "dqn"
-        if selected in {"minimax", "alpha-beta", "alpha_beta"}:
-            return "minimax"
-        return "auto"
-
-    def _current_algorithm_key(self) -> str:
-        if isinstance(self.agent, QLearningAgent):
-            return "q_learning"
-        if isinstance(self.agent, DQNAgent):
-            return "dqn"
-        if isinstance(self.agent, MinimaxAgent):
-            return "minimax"
-        return "auto"
-
-    def _ensure_selected_algorithm(self) -> None:
-        selected = self._selected_algorithm_key()
-        current = self._current_algorithm_key()
-        if selected == "auto" and current == "minimax":
-            return
-        if selected == current:
-            return
-        self.agent = create_agent(board_size=self.env.board_size, algorithm=selected)
-        self.pending_transitions = {1: None, -1: None}
-        self.status_var.set(f"Switched AI algorithm to {selected}.")
-
     def _apply_board_size(self) -> None:
         size = int(self.board_size_var.get())
         self.env = GomokuEnv(board_size=size)
-        self._ensure_selected_algorithm()
         if hasattr(self.agent, "set_board_size"):
             self.agent.set_board_size(size)
-        self.pending_transitions = {1: None, -1: None}
         self.last_move = None
         self.win_line_cells = None
         self.show_win_line = False
@@ -377,14 +344,12 @@ class GomokuApp(ctk.CTk):
         self.finish_scheduled = False
         self.is_running = False
         self._refresh_start_icon()
-        self.status_var.set(f"Applied {size} x {size} board. Learned knowledge preserved.")
+        self.status_var.set(f"Applied {size} x {size} board.")
         self._refresh_turn_label()
         self._update_statistics()
         self._refresh_board()
 
     def _toggle_running(self) -> None:
-        if not self.is_running:
-            self._ensure_selected_algorithm()
         self.is_running = not self.is_running
         self._refresh_start_icon()
         self.status_var.set("Training running." if self.is_running else "Paused.")
@@ -394,7 +359,6 @@ class GomokuApp(ctk.CTk):
     def _reset_game(self) -> None:
         self.env.reset()
         self._ui_tick_counter = 0
-        self.pending_transitions = {1: None, -1: None}
         self.game_over = False
         self.finish_scheduled = False
         self.win_line_cells = None
@@ -409,31 +373,25 @@ class GomokuApp(ctk.CTk):
     def _reset_ai_knowledge(self) -> None:
         answer = messagebox.askyesno(
             "Reset AI",
-            "Reset toàn bộ tri thức AI hiện tại?\nHành động này sẽ xóa kiến thức đã học trong bộ nhớ.",
+            "Reset trang thai AI hien tai?\nVoi Minimax, thao tac nay dua engine ve cau hinh mac dinh.",
         )
         if not answer:
             return
 
         self.is_running = False
         self._refresh_start_icon()
-        self.pending_transitions = {1: None, -1: None}
         self.center_opening_hits = 0
         self.center_opening_samples = 0
 
         if hasattr(self.agent, "reset_knowledge"):
             self.agent.reset_knowledge()
         else:
-            if isinstance(self.agent, QLearningAgent):
-                self.agent = create_agent(self.env.board_size, algorithm="q_learning")
-            elif isinstance(self.agent, MinimaxAgent):
-                self.agent = create_agent(self.env.board_size, algorithm="minimax")
-            else:
-                self.agent = create_agent(self.env.board_size, algorithm="dqn")
+            self.agent = create_agent(self.env.board_size, algorithm="minimax")
 
         if hasattr(self.agent, "set_board_size"):
             self.agent.set_board_size(self.env.board_size)
 
-        self.status_var.set("AI knowledge reset complete.")
+        self.status_var.set("AI state reset complete.")
         self._update_statistics()
 
     def _schedule_next_step(self, delay_ms: int) -> None:
@@ -457,7 +415,7 @@ class GomokuApp(ctk.CTk):
         else:
             action = self._choose_agent_move(current_player)
 
-        self._apply_move(action, current_player, learning_enabled=True)
+        self._apply_move(action, current_player)
         if not self._is_no_ui_active():
             self._refresh_board()
 
@@ -471,7 +429,7 @@ class GomokuApp(ctk.CTk):
             return
         current_player = int(self.env.current_player)
         action = self._choose_agent_move(current_player)
-        self._apply_move(action, current_player, learning_enabled=True)
+        self._apply_move(action, current_player)
         if not self._is_no_ui_active():
             self._refresh_board()
 
@@ -493,8 +451,7 @@ class GomokuApp(ctk.CTk):
     def _choose_agent_move(self, player: int) -> int:
         state = self.env.get_perspective_board(player)
         legal_moves = self.env.legal_moves()
-        explore = not isinstance(self.agent, MinimaxAgent)
-        return int(self.agent.choose_action(state, legal_moves, explore=explore))
+        return int(self.agent.choose_action(state, legal_moves, explore=False))
 
     def _on_canvas_click(self, event) -> None:
         if self.mode_var.get() != "Human vs AI":
@@ -508,12 +465,21 @@ class GomokuApp(ctk.CTk):
         row, col = self._pixel_to_move(event.x, event.y)
         if row is None or col is None:
             return
-        self._apply_move(row * self.env.board_size + col, human_player, learning_enabled=False)
+        if int(self.env.board[row, col]) != 0:
+            self.status_var.set("O nay da co quan, vui long chon o khac.")
+            return
+
+        applied = self._apply_move(row * self.env.board_size + col, human_player, schedule_ai=False)
+        if not applied:
+            return
         self._refresh_board()
+        self.update_idletasks()
         if self.game_over:
             return
         else:
             self._refresh_turn_label()
+        if self._is_ai_turn():
+            self.after(1, self._auto_ai_step)
 
     def _pixel_to_move(self, x: int, y: int) -> tuple[Optional[int], Optional[int]]:
         size = self.env.board_size
@@ -526,30 +492,22 @@ class GomokuApp(ctk.CTk):
             return None, None
         return row, col
 
-    def _apply_move(self, action: int, player: int, learning_enabled: bool) -> None:
+    def _apply_move(self, action: int, player: int, schedule_ai: bool = True) -> bool:
+        if not self.env.is_valid_move(int(action)):
+            self.status_var.set("O nay da co quan, vui long chon o khac.")
+            return False
+
         row, col = divmod(int(action), self.env.board_size)
         was_opening = self.env.move_count < max(4, self.env.win_length)
-        state = self.env.get_perspective_board(player)
         result = self.env.step(action)
-        next_state = self.env.get_perspective_board(-player) if not result.done else np.zeros_like(state)
-        transition = Transition(state=state, action=int(action), reward=float(result.reward), next_state=next_state, done=bool(result.done), board_size=self.env.board_size)
 
-        ai_player = 1 if self.human_side_var.get() == "Second" else -1
-        if self.mode_var.get() == "Training":
-            store_current = self.training_opponent_var.get() != "Random Bot" or player == 1
-        else:
-            store_current = player == ai_player
-
-        if store_current and was_opening and not result.info.get("illegal"):
+        if was_opening and not result.info.get("illegal"):
             center = (self.env.board_size - 1) / 2.0
             radius = max(1.5, self.env.board_size * 0.22)
             distance = float(np.sqrt((row - center) ** 2 + (col - center) ** 2))
             self.center_opening_samples += 1
             if distance <= radius:
                 self.center_opening_hits += 1
-
-        if learning_enabled or self.mode_var.get() == "Human vs AI":
-            self._process_learning(player, transition, result, store_current=store_current)
 
         self.total_moves += 1
         self._ui_tick_counter += 1
@@ -581,7 +539,7 @@ class GomokuApp(ctk.CTk):
         else:
             self._refresh_turn_label()
             self._update_statistics()
-        if self.mode_var.get() == "Human vs AI" and not self.game_over and self._is_ai_turn():
+        if schedule_ai and self.mode_var.get() == "Human vs AI" and not self.game_over and self._is_ai_turn():
             self.after(int(self.move_delay_var.get()), self._auto_ai_step)
 
         if self.game_over and not self.finish_scheduled:
@@ -591,72 +549,11 @@ class GomokuApp(ctk.CTk):
                 self.after(self.win_line_delay_ms + max(320, int(self.move_delay_var.get())), self._finish_episode)
             else:
                 self.after(max(220, int(self.move_delay_var.get())), self._finish_episode)
+        return True
 
     def _show_win_line(self) -> None:
         self.show_win_line = True
         self._refresh_board()
-
-    def _process_learning(self, player: int, transition: Transition, result, store_current: bool) -> None:
-        if isinstance(self.agent, MinimaxAgent):
-            return
-        if isinstance(self.agent, QLearningAgent):
-            self._learn_transition_q(player, transition, result, store_current)
-        else:
-            self._learn_transition_dqn(player, transition, result, store_current)
-
-    def _learn_transition_q(self, player: int, transition: Transition, result, store_current: bool) -> None:
-        if result.done and result.info.get("winner"):
-            transition.reward = 100.0 if int(result.info["winner"]) == player else -100.0
-            if store_current:
-                self.agent.learn_transition(transition)
-            opponent = -player
-            pending = self.pending_transitions.get(opponent)
-            if pending is not None:
-                pending.reward = -100.0 if int(result.info["winner"]) == player else pending.reward
-                pending.done = True
-                self.agent.learn_transition(pending)
-                self.pending_transitions[opponent] = None
-            if store_current:
-                self.pending_transitions[player] = None
-            return
-
-        pending = self.pending_transitions.get(-player)
-        if pending is not None:
-            self.agent.learn_transition(pending)
-            self.pending_transitions[-player] = None
-
-        if store_current:
-            self.pending_transitions[player] = transition
-            if result.done:
-                self.agent.learn_transition(transition)
-                self.pending_transitions[player] = None
-
-    def _learn_transition_dqn(self, player: int, transition: Transition, result, store_current: bool) -> None:
-        if result.done and result.info.get("winner"):
-            transition.reward = 100.0 if int(result.info["winner"]) == player else -100.0
-            if store_current:
-                self.agent.learn_from_transition(transition)
-            opponent = -player
-            pending = self.pending_transitions.get(opponent)
-            if pending is not None:
-                pending.reward = -100.0 if int(result.info["winner"]) == player else pending.reward
-                pending.done = True
-                self.agent.learn_from_transition(pending)
-                self.pending_transitions[opponent] = None
-            if store_current:
-                self.pending_transitions[player] = None
-            return
-
-        pending = self.pending_transitions.get(-player)
-        if pending is not None:
-            self.agent.learn_from_transition(pending)
-            self.pending_transitions[-player] = None
-
-        if store_current:
-            self.pending_transitions[player] = transition
-            if result.done:
-                self.agent.learn_from_transition(transition)
-                self.pending_transitions[player] = None
 
     def _finish_episode(self) -> None:
         if not self.finish_scheduled:
@@ -688,7 +585,6 @@ class GomokuApp(ctk.CTk):
         self.total_episodes += 1
         self._ui_tick_counter = 0
         self._update_statistics()
-        self.pending_transitions = {1: None, -1: None}
         self.finish_scheduled = False
         self.game_over = False
         self.win_line_cells = None
@@ -712,9 +608,8 @@ class GomokuApp(ctk.CTk):
             self.turn_var.set(f"Current turn: {color}")
 
     def _update_statistics(self) -> None:
-        epsilon = getattr(self.agent, "epsilon", 1.0)
-        updates = getattr(self.agent, "total_updates", 0)
-        self.stats_var.set(f"Episodes: {self.total_episodes} | Moves: {self.total_moves} | Updates: {updates} | Epsilon: {epsilon:.3f}")
+        depth = int(getattr(self.agent, "max_depth", 3))
+        self.stats_var.set(f"Episodes: {self.total_episodes} | Moves: {self.total_moves} | Engine: Minimax | Depth: {depth}")
         if self.mode_var.get() == "Human vs AI":
             self.score_var.set(f"AI Wins: {self.ai_wins} | AI Losses: {self.ai_losses} | Draws: {self.draws}")
         else:
@@ -722,19 +617,13 @@ class GomokuApp(ctk.CTk):
 
         self.x_score_var.set(str(self.p1_wins))
         self.o_score_var.set(str(self.p2_wins))
-        self.ai_level_var.set(f"{self._estimate_ai_level(float(epsilon), int(updates))}/100")
+        self.ai_level_var.set(f"{self._estimate_ai_level(depth)}/100")
         center_ratio = 0.0 if self.center_opening_samples == 0 else (self.center_opening_hits / self.center_opening_samples) * 100.0
         self.center_focus_var.set(f"Center focus: {center_ratio:.1f}% (opening AI moves)")
 
-    def _estimate_ai_level(self, epsilon: float, updates: int) -> int:
-        if isinstance(self.agent, MinimaxAgent):
-            depth_boost = min(100.0, 55.0 + 12.0 * float(self.agent.max_depth))
-            return int(round(depth_boost))
-        update_score = min(60.0, updates / 50.0)
-        confidence_score = max(0.0, 25.0 * (1.0 - min(1.0, epsilon)))
-        center_ratio = 0.0 if self.center_opening_samples == 0 else (self.center_opening_hits / self.center_opening_samples) * 100.0
-        center_score = min(15.0, center_ratio * 0.15)
-        return int(round(min(100.0, update_score + confidence_score + center_score)))
+    def _estimate_ai_level(self, depth: int) -> int:
+        depth_boost = min(100.0, 55.0 + 12.0 * float(depth))
+        return int(round(depth_boost))
 
     def _refresh_board(self) -> None:
         self.canvas.delete("all")
@@ -830,29 +719,16 @@ class GomokuApp(ctk.CTk):
                 payload = pickle.load(handle)
             model_type = payload.get("type")
             board_size = int(payload.get("board_size", self.env.board_size))
-            if model_type == "q_learning":
-                loaded = QLearningAgent.load(file_path)
-            elif model_type == "dqn":
-                loaded = DQNAgent.load(file_path)
-            elif model_type == "minimax":
-                loaded = MinimaxAgent.load(file_path)
-            else:
-                raise ValueError("Unsupported model file")
+            if model_type != "minimax":
+                raise ValueError("Only minimax model files are supported.")
+            loaded = MinimaxAgent.load(file_path)
 
             self.env = GomokuEnv(board_size=board_size)
             self.agent = loaded
-            if isinstance(self.agent, QLearningAgent):
-                self.algorithm_var.set("Q-Learning")
-            elif isinstance(self.agent, DQNAgent):
-                self.algorithm_var.set("DQN")
-            elif isinstance(self.agent, MinimaxAgent):
-                self.algorithm_var.set("Minimax")
-            else:
-                self.algorithm_var.set("Auto")
+            self.algorithm_var.set("Minimax (Alpha-Beta)")
             self.board_size_var.set(board_size)
             self.board_size_display_var.set(f"{board_size} x {board_size}")
             self.board_slider.set(board_size)
-            self.pending_transitions = {1: None, -1: None}
             self.game_over = False
             self.is_running = False
             self.finish_scheduled = False

@@ -1430,15 +1430,5 @@ def create_agent(
     gamma: float = 0.9,
     minimax_depth: int = 3,
 ) -> "QLearningAgent | DQNAgent | MinimaxAgent":
-    algorithm = algorithm.lower().strip()
-    if algorithm == "auto":
-        algorithm = "minimax"
-    if algorithm in {"minimax", "mini-max", "alpha_beta", "alpha-beta"}:
-        return MinimaxAgent(board_size=board_size, max_depth=minimax_depth)
-    if algorithm in {"q", "q_learning", "q-learning"}:
-        lr = 0.14 if learning_rate is None else float(learning_rate)
-        return QLearningAgent(board_size=board_size, learning_rate=lr, gamma=gamma)
-    if algorithm == "dqn":
-        lr = 0.08 if learning_rate is None else float(learning_rate)
-        return DQNAgent(board_size=board_size, learning_rate=lr, gamma=gamma)
-    raise ValueError(f"Unknown algorithm: {algorithm}")
+    del algorithm, learning_rate, gamma
+    return MinimaxAgent(board_size=board_size, max_depth=minimax_depth)
