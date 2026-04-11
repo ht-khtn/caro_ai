@@ -682,6 +682,211 @@ class DenseNetwork:
         return loss
 
 
+class MinimaxAgent:
+    def __init__(
+        self,
+        board_size: int,
+        max_depth: int = 3,
+        max_branching: int = 14,
+    ) -> None:
+        self.board_size = int(board_size)
+        self.max_depth = max(1, int(max_depth))
+        self.max_branching = max(4, int(max_branching))
+        self.epsilon = 0.0
+        self.total_updates = 0
+
+    def set_board_size(self, board_size: int) -> None:
+        self.board_size = int(board_size)
+
+    def reset_knowledge(self) -> None:
+        self.total_updates = 0
+
+    def save(self, path: str | Path) -> None:
+        payload = {
+            "type": "minimax",
+            "board_size": self.board_size,
+            "max_depth": self.max_depth,
+            "max_branching": self.max_branching,
+        }
+        with open(path, "wb") as handle:
+            pickle.dump(payload, handle)
+
+    @classmethod
+    def load(cls, path: str | Path) -> "MinimaxAgent":
+        with open(path, "rb") as handle:
+            payload = pickle.load(handle)
+        return cls(
+            board_size=int(payload.get("board_size", 15)),
+            max_depth=int(payload.get("max_depth", 3)),
+            max_branching=int(payload.get("max_branching", 14)),
+        )
+
+    def choose_action(self, state: np.ndarray, legal_moves: Sequence[int], explore: bool = False) -> int:
+        del explore
+        legal = [int(move) for move in legal_moves]
+        if not legal:
+            return 0
+
+        win_length = min(5, self.board_size)
+        immediate_win = _find_immediate_wins(state, legal, self.board_size, player=1, win_length=win_length)
+        if immediate_win:
+            return _pick_weighted_move(state, self.board_size, immediate_win)
+
+        immediate_block = _find_immediate_wins(state, legal, self.board_size, player=-1, win_length=win_length)
+        if immediate_block:
+            return _pick_weighted_move(state, self.board_size, immediate_block)
+
+        candidates = self._rank_candidates(state, legal, player=1)
+        if not candidates:
+            return _pick_weighted_move(state, self.board_size, legal)
+
+        alpha = -float("inf")
+        beta = float("inf")
+        best_score = -float("inf")
+        best_moves: List[int] = []
+        depth = max(1, int(self.max_depth))
+
+        for move in candidates:
+            next_board = state.copy()
+            row, col = divmod(int(move), self.board_size)
+            next_board[row, col] = 1
+            score = self._alphabeta(next_board, depth - 1, alpha, beta, maximizing=False)
+            if score > best_score + 1e-6:
+                best_score = score
+                best_moves = [int(move)]
+            elif abs(score - best_score) < 1e-6:
+                best_moves.append(int(move))
+            alpha = max(alpha, best_score)
+
+        if len(best_moves) == 1:
+            return int(best_moves[0])
+        return _pick_weighted_move(state, self.board_size, best_moves)
+
+    def _alphabeta(self, board: np.ndarray, depth: int, alpha: float, beta: float, maximizing: bool) -> float:
+        terminal_score = self._terminal_score(board, depth)
+        if terminal_score is not None:
+            return terminal_score
+
+        if depth <= 0:
+            return self._evaluate_board(board)
+
+        legal = np.flatnonzero(board.reshape(-1) == 0).astype(np.int32).tolist()
+        if not legal:
+            return 0.0
+
+        player = 1 if maximizing else -1
+        candidates = self._rank_candidates(board, legal, player)
+        if maximizing:
+            value = -float("inf")
+            for move in candidates:
+                row, col = divmod(int(move), self.board_size)
+                board[row, col] = 1
+                value = max(value, self._alphabeta(board, depth - 1, alpha, beta, maximizing=False))
+                board[row, col] = 0
+                alpha = max(alpha, value)
+                if beta <= alpha:
+                    break
+            return value
+
+        value = float("inf")
+        for move in candidates:
+            row, col = divmod(int(move), self.board_size)
+            board[row, col] = -1
+            value = min(value, self._alphabeta(board, depth - 1, alpha, beta, maximizing=True))
+            board[row, col] = 0
+            beta = min(beta, value)
+            if beta <= alpha:
+                break
+        return value
+
+    def _rank_candidates(self, board: np.ndarray, legal_moves: Sequence[int], player: int) -> List[int]:
+        frontier = _frontier_moves(board, legal_moves, self.board_size, radius=2)
+        if not frontier:
+            return [int(move) for move in legal_moves][: self.max_branching]
+
+        win_length = min(5, self.board_size)
+        own_wins = set(_find_immediate_wins(board, frontier, self.board_size, player=player, win_length=win_length))
+        opp_wins = set(_find_immediate_wins(board, frontier, self.board_size, player=-player, win_length=win_length))
+        weights = _heuristic_move_bonus(board, self.board_size, frontier, last_move=None)
+        weighted = {int(move): float(weight) for move, weight in zip(frontier, weights)}
+
+        scored: List[Tuple[float, int]] = []
+        for move in frontier:
+            score = 0.0
+            if int(move) in own_wins:
+                score += 100_000.0
+            if int(move) in opp_wins:
+                score += 90_000.0
+            score += 200.0 * weighted.get(int(move), 0.0)
+            scored.append((score, int(move)))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [move for _, move in scored[: self.max_branching]]
+
+    def _terminal_score(self, board: np.ndarray, depth: int) -> Optional[float]:
+        win_length = min(5, self.board_size)
+        if self._has_win(board, player=1, win_length=win_length):
+            return 1_000_000.0 + float(depth)
+        if self._has_win(board, player=-1, win_length=win_length):
+            return -1_000_000.0 - float(depth)
+        if int(np.count_nonzero(board == 0)) == 0:
+            return 0.0
+        return None
+
+    def _evaluate_board(self, board: np.ndarray) -> float:
+        legal = np.flatnonzero(board.reshape(-1) == 0).astype(np.int32).tolist()
+        if not legal:
+            return 0.0
+
+        win_length = min(5, self.board_size)
+        own_wins = len(_find_immediate_wins(board, legal, self.board_size, player=1, win_length=win_length))
+        opp_wins = len(_find_immediate_wins(board, legal, self.board_size, player=-1, win_length=win_length))
+        own_open_three = len(_find_open_three_end_blocks(board, legal, self.board_size, player=1))
+        opp_open_three = len(_find_open_three_end_blocks(board, legal, self.board_size, player=-1))
+
+        own_best_len, own_best_open = self._best_line_features(board, player=1)
+        opp_best_len, opp_best_open = self._best_line_features(board, player=-1)
+        stone_balance = float(np.count_nonzero(board == 1) - np.count_nonzero(board == -1))
+
+        return (
+            45_000.0 * float(own_wins)
+            - 52_000.0 * float(opp_wins)
+            + 900.0 * float(own_open_three)
+            - 1_200.0 * float(opp_open_three)
+            + 850.0 * float(own_best_len)
+            - 1_050.0 * float(opp_best_len)
+            + 180.0 * float(own_best_open)
+            - 220.0 * float(opp_best_open)
+            + 8.0 * stone_balance
+        )
+
+    def _best_line_features(self, board: np.ndarray, player: int) -> Tuple[int, int]:
+        best_len = 0
+        best_open = 0
+        occupied = np.argwhere(board == int(player))
+        for row, col in occupied:
+            move = int(row) * self.board_size + int(col)
+            length, open_ends = _max_line_after_move(board, move, self.board_size, int(player))
+            if length > best_len or (length == best_len and open_ends > best_open):
+                best_len = int(length)
+                best_open = int(open_ends)
+        return best_len, best_open
+
+    def _has_win(self, board: np.ndarray, player: int, win_length: int) -> bool:
+        directions = ((1, 0), (0, 1), (1, 1), (1, -1))
+        for row in range(self.board_size):
+            for col in range(self.board_size):
+                if int(board[row, col]) != int(player):
+                    continue
+                for dr, dc in directions:
+                    length = 1
+                    length += _count_connected(board, row, col, dr, dc, int(player))
+                    length += _count_connected(board, row, col, -dr, -dc, int(player))
+                    if length >= win_length:
+                        return True
+        return False
+
+
 class QLearningAgent:
     def __init__(
         self,
@@ -1223,10 +1428,13 @@ def create_agent(
     algorithm: str = "auto",
     learning_rate: Optional[float] = None,
     gamma: float = 0.9,
-) -> "QLearningAgent | DQNAgent":
+    minimax_depth: int = 3,
+) -> "QLearningAgent | DQNAgent | MinimaxAgent":
     algorithm = algorithm.lower().strip()
     if algorithm == "auto":
-        algorithm = "q_learning" if board_size <= 5 else "dqn"
+        algorithm = "minimax"
+    if algorithm in {"minimax", "mini-max", "alpha_beta", "alpha-beta"}:
+        return MinimaxAgent(board_size=board_size, max_depth=minimax_depth)
     if algorithm in {"q", "q_learning", "q-learning"}:
         lr = 0.14 if learning_rate is None else float(learning_rate)
         return QLearningAgent(board_size=board_size, learning_rate=lr, gamma=gamma)

@@ -1,6 +1,6 @@
 # Gomoku RL Trainer
 
-Ứng dụng huấn luyện Caro/Gomoku bằng reinforcement learning với giao diện `customtkinter`.
+Ứng dụng Caro/Gomoku với AI Minimax + Alpha-Beta (mặc định), đồng thời vẫn hỗ trợ reinforcement learning với giao diện `customtkinter`.
 
 ## Tính năng chính
 
@@ -8,7 +8,8 @@
 - Win length tự động: 3 cho bàn 3x3, 4 cho bàn 4x4, và 5 cho các bàn lớn hơn.
 - Hai chế độ: Training và Human vs AI.
 - Training opponent: Self-Play hoặc Random Bot.
-- AI tự học liên tục trong cả chế độ training và khi chơi với người.
+- AI Minimax + Alpha-Beta cho chế độ chơi ổn định, có thể chỉnh độ sâu tìm kiếm.
+- Vẫn giữ tùy chọn AI tự học (Q-Learning/DQN) để so sánh.
 - Lưu / tải model bằng file pickle.
 - Reward shaping theo yêu cầu:
   - Thắng: +100
@@ -32,21 +33,16 @@ pip install -r requirements.txt
 
 ## Chạy chương trình
 
-Headless training (mặc định, tối ưu tốc độ):
+Chạy trực tiếp GUI (mặc định):
 
 ```powershell
-python main.py --episodes 50000 --save-path checkpoints/gomoku.pkl
-```
-
-Mở GUI:
-
-```powershell
-python main.py --with-gui
+python main.py
 ```
 
 ## Ghi chú kỹ thuật
 
-- `QLearningAgent` dùng cho bàn nhỏ.
+- `MinimaxAgent` + Alpha-Beta là mặc định khi chọn `auto`.
+- `QLearningAgent` và `DQNAgent` vẫn khả dụng để train theo RL.
 - `DQNAgent` dùng backend PyTorch, tự ưu tiên CUDA GPU nếu khả dụng.
 - Augmentation đối xứng 8 hướng được áp dụng để tăng dữ liệu huấn luyện.
 - Khi đổi kích thước bàn cờ, model sẽ được khởi tạo lại vì kích thước state/action thay đổi.

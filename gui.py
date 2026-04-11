@@ -8,7 +8,7 @@ import customtkinter as ctk
 import numpy as np
 from tkinter import Canvas, Label, Toplevel, filedialog, messagebox
 
-from agent import DQNAgent, QLearningAgent, Transition, create_agent
+from agent import DQNAgent, MinimaxAgent, QLearningAgent, Transition, create_agent
 from environment import GomokuEnv
 
 
@@ -131,8 +131,8 @@ class GomokuApp(ctk.CTk):
         )
         self.human_side_menu.pack(fill="x", padx=14, pady=(0, 14))
 
-        self._add_section_label(self.settings_scroll, "Algorithm", "Auto: ban nho dung Q-Learning, ban lon dung DQN. Co the chon thu cong.")
-        self.algorithm_menu = ctk.CTkOptionMenu(self.settings_scroll, values=["Auto", "Q-Learning", "DQN"], variable=self.algorithm_var)
+        self._add_section_label(self.settings_scroll, "Algorithm", "Auto mac dinh dung Minimax + Alpha-Beta. Van co the chon Q-Learning hoac DQN.")
+        self.algorithm_menu = ctk.CTkOptionMenu(self.settings_scroll, values=["Auto", "Minimax", "Q-Learning", "DQN"], variable=self.algorithm_var)
         self.algorithm_menu.pack(fill="x", padx=14, pady=(0, 14))
 
         self._add_section_label(self.settings_scroll, "Curriculum Board Size", "Bat dau ban nho de hoc khai niem, sau do tang dan toi 15x15.")
@@ -333,9 +333,40 @@ class GomokuApp(ctk.CTk):
     def _refresh_start_icon(self) -> None:
         self.start_button.configure(text="⏸" if self.is_running else "▶")
 
+    def _selected_algorithm_key(self) -> str:
+        selected = self.algorithm_var.get().strip().lower()
+        if selected in {"q-learning", "q_learning", "q"}:
+            return "q_learning"
+        if selected == "dqn":
+            return "dqn"
+        if selected in {"minimax", "alpha-beta", "alpha_beta"}:
+            return "minimax"
+        return "auto"
+
+    def _current_algorithm_key(self) -> str:
+        if isinstance(self.agent, QLearningAgent):
+            return "q_learning"
+        if isinstance(self.agent, DQNAgent):
+            return "dqn"
+        if isinstance(self.agent, MinimaxAgent):
+            return "minimax"
+        return "auto"
+
+    def _ensure_selected_algorithm(self) -> None:
+        selected = self._selected_algorithm_key()
+        current = self._current_algorithm_key()
+        if selected == "auto" and current == "minimax":
+            return
+        if selected == current:
+            return
+        self.agent = create_agent(board_size=self.env.board_size, algorithm=selected)
+        self.pending_transitions = {1: None, -1: None}
+        self.status_var.set(f"Switched AI algorithm to {selected}.")
+
     def _apply_board_size(self) -> None:
         size = int(self.board_size_var.get())
         self.env = GomokuEnv(board_size=size)
+        self._ensure_selected_algorithm()
         if hasattr(self.agent, "set_board_size"):
             self.agent.set_board_size(size)
         self.pending_transitions = {1: None, -1: None}
@@ -352,6 +383,8 @@ class GomokuApp(ctk.CTk):
         self._refresh_board()
 
     def _toggle_running(self) -> None:
+        if not self.is_running:
+            self._ensure_selected_algorithm()
         self.is_running = not self.is_running
         self._refresh_start_icon()
         self.status_var.set("Training running." if self.is_running else "Paused.")
@@ -392,6 +425,8 @@ class GomokuApp(ctk.CTk):
         else:
             if isinstance(self.agent, QLearningAgent):
                 self.agent = create_agent(self.env.board_size, algorithm="q_learning")
+            elif isinstance(self.agent, MinimaxAgent):
+                self.agent = create_agent(self.env.board_size, algorithm="minimax")
             else:
                 self.agent = create_agent(self.env.board_size, algorithm="dqn")
 
@@ -458,7 +493,8 @@ class GomokuApp(ctk.CTk):
     def _choose_agent_move(self, player: int) -> int:
         state = self.env.get_perspective_board(player)
         legal_moves = self.env.legal_moves()
-        return int(self.agent.choose_action(state, legal_moves, explore=True))
+        explore = not isinstance(self.agent, MinimaxAgent)
+        return int(self.agent.choose_action(state, legal_moves, explore=explore))
 
     def _on_canvas_click(self, event) -> None:
         if self.mode_var.get() != "Human vs AI":
@@ -561,6 +597,8 @@ class GomokuApp(ctk.CTk):
         self._refresh_board()
 
     def _process_learning(self, player: int, transition: Transition, result, store_current: bool) -> None:
+        if isinstance(self.agent, MinimaxAgent):
+            return
         if isinstance(self.agent, QLearningAgent):
             self._learn_transition_q(player, transition, result, store_current)
         else:
@@ -684,11 +722,14 @@ class GomokuApp(ctk.CTk):
 
         self.x_score_var.set(str(self.p1_wins))
         self.o_score_var.set(str(self.p2_wins))
-        self.ai_level_var.set(f"{self._estimate_ai_level(epsilon, updates)}/100")
+        self.ai_level_var.set(f"{self._estimate_ai_level(float(epsilon), int(updates))}/100")
         center_ratio = 0.0 if self.center_opening_samples == 0 else (self.center_opening_hits / self.center_opening_samples) * 100.0
         self.center_focus_var.set(f"Center focus: {center_ratio:.1f}% (opening AI moves)")
 
     def _estimate_ai_level(self, epsilon: float, updates: int) -> int:
+        if isinstance(self.agent, MinimaxAgent):
+            depth_boost = min(100.0, 55.0 + 12.0 * float(self.agent.max_depth))
+            return int(round(depth_boost))
         update_score = min(60.0, updates / 50.0)
         confidence_score = max(0.0, 25.0 * (1.0 - min(1.0, epsilon)))
         center_ratio = 0.0 if self.center_opening_samples == 0 else (self.center_opening_hits / self.center_opening_samples) * 100.0
@@ -793,11 +834,21 @@ class GomokuApp(ctk.CTk):
                 loaded = QLearningAgent.load(file_path)
             elif model_type == "dqn":
                 loaded = DQNAgent.load(file_path)
+            elif model_type == "minimax":
+                loaded = MinimaxAgent.load(file_path)
             else:
                 raise ValueError("Unsupported model file")
 
             self.env = GomokuEnv(board_size=board_size)
             self.agent = loaded
+            if isinstance(self.agent, QLearningAgent):
+                self.algorithm_var.set("Q-Learning")
+            elif isinstance(self.agent, DQNAgent):
+                self.algorithm_var.set("DQN")
+            elif isinstance(self.agent, MinimaxAgent):
+                self.algorithm_var.set("Minimax")
+            else:
+                self.algorithm_var.set("Auto")
             self.board_size_var.set(board_size)
             self.board_size_display_var.set(f"{board_size} x {board_size}")
             self.board_slider.set(board_size)

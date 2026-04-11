@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import argparse
 import time
 from pathlib import Path
 from typing import Dict, Optional, Union
 
 import numpy as np
 
-from agent import DQNAgent, QLearningAgent, Transition, create_agent, get_torch_device_info
+from agent import DQNAgent, MinimaxAgent, QLearningAgent, Transition, create_agent, get_torch_device_info
 from environment import GomokuEnv
 
 
-def _agent_backend_info(agent: Union[QLearningAgent, DQNAgent]) -> str:
+def _agent_backend_info(agent: Union[QLearningAgent, DQNAgent, MinimaxAgent]) -> str:
+    if isinstance(agent, MinimaxAgent):
+        return f"minimax:depth={agent.max_depth}"
     if isinstance(agent, DQNAgent):
         return agent.backend_info()
     return "q_learning:cpu"
@@ -25,6 +26,8 @@ def _apply_training_hyperparams(agent, epsilon_min: float, epsilon_decay: float)
 
 
 def _learn_transition(agent, pending: Dict[int, Optional[Transition]], player: int, transition: Transition, result, store_current: bool) -> None:
+    if isinstance(agent, MinimaxAgent):
+        return
     if isinstance(agent, QLearningAgent):
         learn_fn = agent.learn_transition
     else:
@@ -65,6 +68,7 @@ def _save_checkpoint(agent, path: Path) -> None:
 def train_headless(
     board_size: int,
     algorithm: str,
+    minimax_depth: int,
     episodes: int,
     opponent: str,
     save_path: Path,
@@ -76,7 +80,11 @@ def train_headless(
     report_every_seconds: int = 15,
 ) -> None:
     env = GomokuEnv(board_size=board_size)
-    agent: Union[QLearningAgent, DQNAgent] = create_agent(board_size=board_size, algorithm=algorithm)
+    agent: Union[QLearningAgent, DQNAgent, MinimaxAgent] = create_agent(
+        board_size=board_size,
+        algorithm=algorithm,
+        minimax_depth=int(minimax_depth),
+    )
     if hasattr(agent, "set_board_size"):
         agent.set_board_size(board_size)
     _apply_training_hyperparams(agent, epsilon_min, epsilon_decay)
@@ -113,7 +121,8 @@ def train_headless(
                 action = int(np.random.choice(legal_moves)) if legal_moves else 0
             else:
                 state = env.get_perspective_board(current_player)
-                action = int(agent.choose_action(state, legal_moves, explore=True))
+                explore = not isinstance(agent, MinimaxAgent)
+                action = int(agent.choose_action(state, legal_moves, explore=explore))
 
             state = env.get_perspective_board(current_player)
             result = env.step(action)
@@ -128,7 +137,8 @@ def train_headless(
             )
 
             store_current = opponent != "random" or current_player == 1
-            _learn_transition(agent, pending, current_player, transition, result, store_current=store_current)
+            if not isinstance(agent, MinimaxAgent):
+                _learn_transition(agent, pending, current_player, transition, result, store_current=store_current)
             done = bool(result.done)
             moves += 1
 
@@ -188,45 +198,10 @@ def train_headless(
     print("Training finished. Final checkpoint saved to {path}.".format(path=save_path))
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Gomoku RL Trainer")
-    parser.add_argument("--with-gui", action="store_true", help="Launch GUI instead of headless training.")
-    parser.add_argument("--episodes", type=int, default=2000, help="Number of training episodes for headless mode.")
-    parser.add_argument("--board-size", type=int, default=15, help="Board size for training.")
-    parser.add_argument("--algorithm", type=str, default="auto", help="auto, q_learning, or dqn.")
-    parser.add_argument("--opponent", type=str, default="self", choices=["self", "random"], help="Training opponent.")
-    parser.add_argument("--save-path", type=str, default="checkpoints/gomoku_model.pkl", help="Checkpoint path.")
-    parser.add_argument("--save-every", type=int, default=50, help="Save every N episodes (0 to disable).")
-    parser.add_argument("--save-every-seconds", type=int, default=120, help="Save every N seconds (0 to disable).")
-    parser.add_argument("--epsilon-min", type=float, default=0.05, help="Minimum epsilon for exploration.")
-    parser.add_argument("--epsilon-decay", type=float, default=0.995, help="Epsilon decay per update.")
-    parser.add_argument("--report-every", type=int, default=50, help="Print progress every N episodes (0 to disable).")
-    parser.add_argument("--report-every-seconds", type=int, default=15, help="Print progress every N seconds (0 to disable).")
-    return parser
-
-
 def main() -> None:
-    parser = build_arg_parser()
-    args = parser.parse_args()
-    if args.with_gui:
-        from gui import run_app
+    from gui import run_app
 
-        run_app()
-        return
-
-    train_headless(
-        board_size=int(args.board_size),
-        algorithm=str(args.algorithm),
-        episodes=int(args.episodes),
-        opponent=str(args.opponent),
-        save_path=Path(args.save_path),
-        save_every=int(args.save_every),
-        save_every_seconds=int(args.save_every_seconds),
-        epsilon_min=float(args.epsilon_min),
-        epsilon_decay=float(args.epsilon_decay),
-        report_every=int(args.report_every),
-        report_every_seconds=int(args.report_every_seconds),
-    )
+    run_app()
 
 
 if __name__ == "__main__":
